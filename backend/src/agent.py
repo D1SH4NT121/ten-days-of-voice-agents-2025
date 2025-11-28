@@ -1,12 +1,9 @@
 import json
 import logging
 import os
-import sqlite3
-import uuid
-import asyncio
+import random
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import List, Optional, Annotated
+from typing import Optional, Annotated
 
 from dotenv import load_dotenv
 from pydantic import Field
@@ -28,7 +25,7 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 # -------------------------
 # Logging
 # -------------------------
-logger = logging.getLogger("food_agent_sqlite")
+logger = logging.getLogger("dnd_game_master")
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
@@ -37,606 +34,407 @@ logger.addHandler(handler)
 load_dotenv(".env.local")
 
 # -------------------------
-# DB config & seeding
-# -------------------------
-DB_FILE = "order_db.sqlite"
-
-
-def get_db_path() -> str:
-    """Return absolute path for the DB file. If __file__ is not defined (interactive), fall back to cwd."""
-    try:
-        base = os.path.abspath(os.path.dirname(__file__))
-    except NameError:
-        base = os.getcwd()
-    # ensure directory exists
-    if not os.path.isdir(base):
-        os.makedirs(base, exist_ok=True)
-    return os.path.join(base, DB_FILE)
-
-
-def get_conn():
-    path = get_db_path()
-    # check_same_thread=False required for async background tasks accessing DB
-    conn = sqlite3.connect(path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
-
-
-def seed_database():
-    """Create tables and seed the Indian catalog if empty."""
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-
-        # Create catalog table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS catalog (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                category TEXT,
-                price REAL NOT NULL,
-                brand TEXT,
-                size TEXT,
-                units TEXT,
-                tags TEXT -- JSON encoded list
-            )
-        """)
-
-        # Orders table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                order_id TEXT PRIMARY KEY,
-                timestamp TEXT,
-                total REAL,
-                customer_name TEXT,
-                address TEXT,
-                status TEXT DEFAULT 'received',
-                created_at TEXT DEFAULT (datetime('now')),
-                updated_at TEXT DEFAULT (datetime('now'))
-            )
-        """)
-
-        # Order items
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS order_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                order_id TEXT,
-                item_id TEXT,
-                name TEXT,
-                unit_price REAL,
-                quantity INTEGER,
-                notes TEXT,
-                FOREIGN KEY(order_id) REFERENCES orders(order_id) ON DELETE CASCADE
-            )
-        """)
-
-        # Check if catalog empty
-        cur.execute("SELECT COUNT(1) FROM catalog")
-        if cur.fetchone()[0] == 0:
-            catalog = [
-                # Dairy
-                ("milk-amul-1l", "Amul Taaza Milk", "Dairy", 72.00, "Amul", "1L", "pack", json.dumps(["dairy", "essential"])),
-                ("paneer-200g", "Amul Malai Paneer", "Dairy", 95.00, "Amul", "200g", "pack", json.dumps(["dairy", "protein", "veg"])),
-                ("butter-100g", "Amul Butter", "Dairy", 58.00, "Amul", "100g", "pack", json.dumps(["dairy"])),
-                ("curd-400g", "Mother Dairy Dahi", "Dairy", 40.00, "Mother Dairy", "400g", "cup", json.dumps(["dairy"])),
-                
-                # Staples/Pantry
-                ("atta-5kg", "Aashirvaad Whole Wheat Atta", "Staples", 245.00, "Aashirvaad", "5kg", "bag", json.dumps(["flour", "roti"])),
-                ("rice-basmati-1kg", "India Gate Basmati Rice", "Staples", 160.00, "India Gate", "1kg", "bag", json.dumps(["rice", "premium"])),
-                ("dal-toor-1kg", "Tata Sampann Toor Dal", "Staples", 185.00, "Tata", "1kg", "pack", json.dumps(["protein", "dal"])),
-                ("salt-1kg", "Tata Salt", "Staples", 28.00, "Tata", "1kg", "pack", json.dumps(["essential"])),
-                ("sugar-1kg", "Madhur Sugar", "Staples", 60.00, "Madhur", "1kg", "pack", json.dumps(["sweet"])),
-                
-                # Snacks & Instant
-                ("maggi-masala", "Maggi 2-Minute Noodles", "Instant Food", 14.00, "Nestle", "70g", "pack", json.dumps(["snack", "noodles"])),
-                ("biscuits-marie", "Britannia Marie Gold", "Snacks", 35.00, "Britannia", "250g", "pack", json.dumps(["tea-time"])),
-                ("chips-lays", "Lays Magic Masala", "Snacks", 20.00, "Lays", "50g", "pack", json.dumps(["snack", "spicy"])),
-                ("tea-250g", "Red Label Tea", "Beverages", 140.00, "Brooke Bond", "250g", "pack", json.dumps(["chai", "tea"])),
-                
-                # Veggies (Market Price estimates)
-                ("potato-1kg", "Fresh Potatoes", "Vegetables", 40.00, "", "1kg", "kg", json.dumps(["veg"])),
-                ("onion-1kg", "Fresh Onions", "Vegetables", 55.00, "", "1kg", "kg", json.dumps(["veg"])),
-                ("tomato-1kg", "Fresh Tomatoes", "Vegetables", 60.00, "", "1kg", "kg", json.dumps(["veg"])),
-                ("ginger-100g", "Fresh Ginger", "Vegetables", 20.00, "", "100g", "g", json.dumps(["veg", "chai"])),
-            ]
-            cur.executemany("""
-                INSERT INTO catalog (id, name, category, price, brand, size, units, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, catalog)
-            conn.commit()
-            logger.info(f"✅ Seeded Indian catalog into {get_db_path()}")
-
-        conn.close()
-    except Exception as e:
-        logger.exception("Failed to seed database: %s", e)
-
-
-# Seed DB on import/run (safe to call multiple times)
-seed_database()
-
-# -------------------------
-# In-memory per-session cart
+# Game State
 # -------------------------
 @dataclass
-class CartItem:
-    item_id: str
-    name: str
-    unit_price: float
-    quantity: int = 1
-    notes: str = ""
+class PlayerCharacter:
+    name: str = "Adventurer"
+    hp: int = 100
+    max_hp: int = 100
+    strength: int = 10
+    intelligence: int = 10
+    luck: int = 10
+    inventory: list = field(default_factory=list)
+    location: str = "Village Square"
+    status: str = "Healthy"
+
+@dataclass
+class GameState:
+    player: PlayerCharacter = field(default_factory=PlayerCharacter)
+    story_progress: list = field(default_factory=list)
+    current_scene: str = "start"
+    game_started: bool = False
+    selected_scenario: str = ""
+    npcs: dict = field(default_factory=dict)  # {name: {status, attitude, location}}
+    active_quests: list = field(default_factory=list)
+    completed_quests: list = field(default_factory=list)
 
 @dataclass
 class Userdata:
-    cart: List[CartItem] = field(default_factory=list)
-    customer_name: Optional[str] = None
+    game_state: GameState = field(default_factory=GameState)
 
 # -------------------------
-# DB Helpers
+# Game Tools
 # -------------------------
+@function_tool
+async def roll_dice(
+    ctx: RunContext[Userdata],
+    sides: Annotated[int, Field(description="Number of sides on the dice (default 20)", default=20)] = 20,
+) -> str:
+    """Roll a dice for skill checks and random events."""
+    result = random.randint(1, sides)
+    logger.info(f"🎲 Dice roll: {result} (d{sides})")
+    return f"You rolled a {result} on a d{sides}!"
 
-def find_catalog_item_by_id_db(item_id: str) -> Optional[dict]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM catalog WHERE LOWER(id) = LOWER(?) LIMIT 1", (item_id,))
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        return None
-    record = dict(row)
+@function_tool
+async def check_inventory(
+    ctx: RunContext[Userdata],
+) -> str:
+    """Check what items the player is carrying."""
+    inventory = ctx.userdata.game_state.player.inventory
+    if not inventory:
+        return "Your inventory is empty."
+    return f"You are carrying: {', '.join(inventory)}"
+
+@function_tool
+async def check_status(
+    ctx: RunContext[Userdata],
+) -> str:
+    """Check player's current health and status."""
+    player = ctx.userdata.game_state.player
+    game_state = ctx.userdata.game_state
+    
+    status = f"Name: {player.name}\nHP: {player.hp}/{player.max_hp}\nSTR: {player.strength} | INT: {player.intelligence} | LUCK: {player.luck}\nStatus: {player.status}\nLocation: {player.location}"
+    
+    if game_state.active_quests:
+        status += f"\nActive Quests: {len(game_state.active_quests)}"
+    if game_state.completed_quests:
+        status += f"\nCompleted Quests: {len(game_state.completed_quests)}"
+    
+    return status
+
+@function_tool
+async def add_item(
+    ctx: RunContext[Userdata],
+    item: Annotated[str, Field(description="Item to add to inventory")],
+) -> str:
+    """Add an item to the player's inventory."""
+    ctx.userdata.game_state.player.inventory.append(item)
+    logger.info(f"📦 Added item: {item}")
+    return f"You picked up: {item}"
+
+@function_tool
+async def update_hp(
+    ctx: RunContext[Userdata],
+    change: Annotated[int, Field(description="HP change (positive for healing, negative for damage)")],
+) -> str:
+    """Update player's health points."""
+    player = ctx.userdata.game_state.player
+    old_hp = player.hp
+    player.hp = max(0, min(100, player.hp + change))
+    
+    if change > 0:
+        logger.info(f"💚 HP healed: {old_hp} -> {player.hp}")
+        return f"You gained {change} HP! Current HP: {player.hp}/100"
+    else:
+        logger.info(f"💔 HP damaged: {old_hp} -> {player.hp}")
+        return f"You took {abs(change)} damage! Current HP: {player.hp}/100"
+
+@function_tool
+async def update_location(
+    ctx: RunContext[Userdata],
+    location: Annotated[str, Field(description="New location name")],
+) -> str:
+    """Update player's current location."""
+    old_location = ctx.userdata.game_state.player.location
+    ctx.userdata.game_state.player.location = location
+    logger.info(f"🗺️ Location changed: {old_location} -> {location}")
+    return f"You have moved to: {location}"
+
+@function_tool
+async def save_progress(
+    ctx: RunContext[Userdata],
+    event: Annotated[str, Field(description="Important story event to remember")],
+) -> str:
+    """Save important story progress."""
+    ctx.userdata.game_state.story_progress.append(event)
+    logger.info(f"📝 Story progress saved: {event}")
+    return f"Progress saved: {event}"
+
+@function_tool
+async def restart_game(
+    ctx: RunContext[Userdata],
+) -> str:
+    """Restart the adventure with a fresh character."""
+    ctx.userdata.game_state = GameState()
+    logger.info("🔄 Game restarted")
+    return "Game restarted! Ready for a new adventure."
+
+@function_tool
+async def select_scenario(
+    ctx: RunContext[Userdata],
+    scenario: Annotated[str, Field(description="Scenario choice: fantasy, cyberpunk, or space")],
+) -> str:
+    """Select the adventure scenario."""
+    scenarios = {
+        "fantasy": "Middle-earth fantasy adventure",
+        "cyberpunk": "Cyberpunk 2077-style city adventure", 
+        "space": "Star Wars-style space opera"
+    }
+    
+    scenario = scenario.lower()
+    if scenario in scenarios:
+        ctx.userdata.game_state.selected_scenario = scenario
+        ctx.userdata.game_state.game_started = True
+        logger.info(f"🎭 Scenario selected: {scenario}")
+        return f"Scenario selected: {scenarios[scenario]}. Let the adventure begin!"
+    else:
+        return "Invalid scenario. Choose: fantasy, cyberpunk, or space."
+
+@function_tool
+async def skill_check(
+    ctx: RunContext[Userdata],
+    skill: Annotated[str, Field(description="Skill type: strength, intelligence, or luck")],
+    difficulty: Annotated[int, Field(description="Difficulty modifier (0-10)", default=0)] = 0,
+) -> str:
+    """Perform a skill check with character attributes."""
+    player = ctx.userdata.game_state.player
+    base_roll = random.randint(1, 20)
+    
+    # Get attribute modifier
+    attr_bonus = getattr(player, skill.lower(), 10) - 10
+    total = base_roll + attr_bonus - difficulty
+    
+    if total >= 16:
+        result = "Critical Success!"
+    elif total >= 11:
+        result = "Success"
+    elif total >= 6:
+        result = "Partial Success"
+    else:
+        result = "Failure"
+    
+    logger.info(f"🎲 Skill check ({skill}): {base_roll} + {attr_bonus} - {difficulty} = {total} ({result})")
+    return f"Rolling {skill} check: {base_roll} + {attr_bonus} - {difficulty} = {total}. {result}!"
+
+@function_tool
+async def update_npc(
+    ctx: RunContext[Userdata],
+    name: Annotated[str, Field(description="NPC name")],
+    status: Annotated[str, Field(description="NPC status (alive/dead/missing)")],
+    attitude: Annotated[str, Field(description="NPC attitude (friendly/neutral/hostile)")],
+) -> str:
+    """Update or add an NPC to the world state."""
+    ctx.userdata.game_state.npcs[name] = {
+        "status": status,
+        "attitude": attitude,
+        "location": ctx.userdata.game_state.player.location
+    }
+    logger.info(f"👤 NPC updated: {name} ({status}, {attitude})")
+    return f"NPC {name} is now {status} and {attitude}."
+
+@function_tool
+async def add_quest(
+    ctx: RunContext[Userdata],
+    quest: Annotated[str, Field(description="Quest description")],
+) -> str:
+    """Add a new quest to the active quests."""
+    ctx.userdata.game_state.active_quests.append(quest)
+    logger.info(f"📋 Quest added: {quest}")
+    return f"New quest: {quest}"
+
+@function_tool
+async def complete_quest(
+    ctx: RunContext[Userdata],
+    quest: Annotated[str, Field(description="Quest to complete")],
+) -> str:
+    """Mark a quest as completed."""
+    if quest in ctx.userdata.game_state.active_quests:
+        ctx.userdata.game_state.active_quests.remove(quest)
+        ctx.userdata.game_state.completed_quests.append(quest)
+        logger.info(f"✅ Quest completed: {quest}")
+        return f"Quest completed: {quest}"
+    return f"Quest '{quest}' not found in active quests."
+
+@function_tool
+async def save_game(
+    ctx: RunContext[Userdata],
+) -> str:
+    """Save the current game state to a JSON file."""
+    import json
+    from datetime import datetime
+    
+    game_data = {
+        "timestamp": datetime.now().isoformat(),
+        "player": {
+            "name": ctx.userdata.game_state.player.name,
+            "hp": ctx.userdata.game_state.player.hp,
+            "max_hp": ctx.userdata.game_state.player.max_hp,
+            "strength": ctx.userdata.game_state.player.strength,
+            "intelligence": ctx.userdata.game_state.player.intelligence,
+            "luck": ctx.userdata.game_state.player.luck,
+            "inventory": ctx.userdata.game_state.player.inventory,
+            "location": ctx.userdata.game_state.player.location,
+            "status": ctx.userdata.game_state.player.status
+        },
+        "scenario": ctx.userdata.game_state.selected_scenario,
+        "story_progress": ctx.userdata.game_state.story_progress,
+        "npcs": ctx.userdata.game_state.npcs,
+        "active_quests": ctx.userdata.game_state.active_quests,
+        "completed_quests": ctx.userdata.game_state.completed_quests
+    }
+    
+    filename = f"game_save_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     try:
-        record["tags"] = json.loads(record.get("tags") or "[]")
-    except Exception:
-        record["tags"] = []
-    return record
+        with open(filename, 'w') as f:
+            json.dump(game_data, f, indent=2)
+        logger.info(f"💾 Game saved: {filename}")
+        return f"Game saved as {filename}"
+    except Exception as e:
+        return f"Failed to save game: {e}"
 
-
-def search_catalog_by_name_db(query: str) -> List[dict]:
-    q = f"%{query.lower()}%"
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT * FROM catalog
-        WHERE LOWER(name) LIKE ? OR LOWER(tags) LIKE ?
-        LIMIT 50
-    """, (q, q))
-    rows = cur.fetchall()
-    conn.close()
-    results = []
-    for r in rows:
-        rec = dict(r)
-        try:
-            rec["tags"] = json.loads(rec.get("tags") or "[]")
-        except Exception:
-            rec["tags"] = []
-        results.append(rec)
-    return results
-
-
-def insert_order_db(order_id: str, timestamp: str, total: float, customer_name: str, address: str, status: str, items: List[CartItem]):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO orders (order_id, timestamp, total, customer_name, address, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-    """, (order_id, timestamp, total, customer_name, address, status))
-    for ci in items:
-        cur.execute("""
-            INSERT INTO order_items (order_id, item_id, name, unit_price, quantity, notes)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (order_id, ci.item_id, ci.name, ci.unit_price, ci.quantity, ci.notes))
-    conn.commit()
-    conn.close()
-
-
-def get_order_db(order_id: str) -> Optional[dict]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE order_id = ? LIMIT 1", (order_id,))
-    o = cur.fetchone()
-    if not o:
-        conn.close()
-        return None
-    order = dict(o)
-    cur.execute("SELECT * FROM order_items WHERE order_id = ?", (order_id,))
-    items = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    order["items"] = items
-    return order
-
-
-def list_orders_db(limit: int = 10, customer_name: Optional[str] = None) -> List[dict]:
-    conn = get_conn()
-    cur = conn.cursor()
-    if customer_name:
-        cur.execute("SELECT * FROM orders WHERE LOWER(customer_name) = LOWER(?) ORDER BY created_at DESC LIMIT ?", (customer_name, limit))
+@function_tool
+async def check_session_status(
+    ctx: RunContext[Userdata],
+) -> str:
+    """Check if this is a new session or continuing session."""
+    game_state = ctx.userdata.game_state
+    
+    # Check if there's existing progress
+    has_progress = (
+        game_state.story_progress or 
+        game_state.selected_scenario or 
+        game_state.player.inventory or 
+        game_state.player.hp != 100 or
+        game_state.active_quests or
+        game_state.completed_quests
+    )
+    
+    if has_progress:
+        summary = f"Welcome back, {game_state.player.name}! "
+        summary += f"You're at {game_state.player.location} with {game_state.player.hp}/{game_state.player.max_hp} HP. "
+        if game_state.selected_scenario:
+            summary += f"Continuing your {game_state.selected_scenario} adventure. "
+        if game_state.active_quests:
+            summary += f"You have {len(game_state.active_quests)} active quest(s). "
+        if game_state.story_progress:
+            summary += f"Last event: {game_state.story_progress[-1]}. "
+        logger.info("🔄 Resuming existing session")
+        return summary + "Ready to continue your adventure!"
     else:
-        cur.execute("SELECT * FROM orders ORDER BY created_at DESC LIMIT ?", (limit,))
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
+        logger.info("✨ New session started")
+        return "Greetings, brave adventurer! Welcome to the realm of endless possibilities. I am your Game Master, ready to guide you through epic tales of heroism and adventure."
 
-
-def update_order_status_db(order_id: str, new_status: str) -> bool:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE orders SET status = ?, updated_at = datetime('now') WHERE order_id = ?", (new_status, order_id))
-    changed = cur.rowcount
-    conn.commit()
-    conn.close()
-    return changed > 0
-
-# -------------------------
-# LOGIC & ASYNC SIMULATION
-# -------------------------
-
-# Recipe map for "Add Recipe" tool
-RECIPE_MAP = {
-    "chai": ["milk-amul-1l", "tea-250g", "sugar-1kg", "ginger-100g"],
-    "paneer butter masala": ["paneer-200g", "butter-100g", "tomato-1kg"],
-    "maggi": ["maggi-masala"],
-    "dal chawal": ["dal-toor-1kg", "rice-basmati-1kg"],
-}
-
-# Intelligent ingredient inference helpers
-import re
-
-_NUMBER_WORDS = {
-    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
-    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10
-}
-
-def _parse_servings_from_text(text: str) -> int:
-    """Try to extract servings/quantity from informal text like 'for two people' or 'for 3'. Default 1."""
-    text = (text or "").lower()
-    m = re.search(r"for\s+(\d+)\s*(?:people|person|servings)?", text)
-    if m:
-        try:
-            return max(1, int(m.group(1)))
-        except Exception:
-            pass
-    for word, num in _NUMBER_WORDS.items():
-        if f"for {word}" in text:
-            return num
-    return 1
-
-
-def _infer_items_from_tags(query: str, max_results: int = 6) -> List[str]:
-    """Try to infer catalog items by matching query words to tags in the catalog. Returns list of item_ids."""
-    words = re.findall(r"\w+", (query or "").lower())
-    found = []
-    conn = get_conn()
-    cur = conn.cursor()
-    for w in words:
-        if len(found) >= max_results:
-            break
-        q = f"%\"{w}\"%"
-        cur.execute("SELECT * FROM catalog WHERE LOWER(tags) LIKE ? OR LOWER(name) LIKE ? LIMIT 10", (q, f"%{w}%"))
-        rows = cur.fetchall()
-        for r in rows:
-            rid = r["id"]
-            if rid not in found:
-                found.append(rid)
-                if len(found) >= max_results:
-                    break
-    conn.close()
-    return found
-
-STATUS_FLOW = ["received", "confirmed", "shipped", "out_for_delivery", "delivered"]
-
-
-async def simulate_delivery_flow(order_id: str):
-    """
-    Background task: automatically advances order status every 5 seconds.
-    Flow: received -> confirmed -> shipped -> out_for_delivery -> delivered
-    """
-    logger.info(f"🔄 [Simulation] Started tracking simulation for {order_id}")
-
-    # initial wait
-    await asyncio.sleep(5)
-
-    # Loop through statuses starting from index 1 (confirmed)
-    for next_status in STATUS_FLOW[1:]:
-        # Check if order was cancelled in the meantime
-        curr_order = get_order_db(order_id)
-        if curr_order and curr_order.get("status") == "cancelled":
-            logger.info(f"🛑 [Simulation] Order {order_id} was cancelled. Stopping simulation.")
-            return
-
-        update_order_status_db(order_id, next_status)
-        logger.info(f"🚚 [Simulation] Order {order_id} updated to '{next_status}'")
-        await asyncio.sleep(5)
-
-    logger.info(f"✅ [Simulation] Order {order_id} simulation complete (Delivered).")
-
-
-def cart_total(cart: List[CartItem]) -> float:
-    return round(sum(ci.unit_price * ci.quantity for ci in cart), 2)
-
-# -------------------------
-# AGENT TOOLS
-# -------------------------
 @function_tool
-async def find_item(
+async def load_game(
     ctx: RunContext[Userdata],
-    query: Annotated[str, Field(description="Name or partial name of item (e.g., 'milk', 'paneer')")],
+    filename: Annotated[str, Field(description="Save file name to load")],
 ) -> str:
-    matches = search_catalog_by_name_db(query)
-    if not matches:
-        return f"No items found matching '{query}'. Try generic names like 'milk' or 'rice'."
-    lines = []
-    for it in matches[:10]:
-        lines.append(f"- {it['name']} (id: {it['id']}) — ₹{it['price']:.2f} — {it.get('size','')}")
-    return "Found:\n" + "\n".join(lines)
-
-
-@function_tool
-async def add_to_cart(
-    ctx: RunContext[Userdata],
-    item_id: Annotated[str, Field(description="Catalog item id")],
-    quantity: Annotated[int, Field(description="Quantity", default=1)] = 1,
-    notes: Annotated[str, Field(description="Optional notes")] = "",
-) -> str:
-    item = find_catalog_item_by_id_db(item_id)
-    if not item:
-        return f"Item id '{item_id}' not found."
-
-    for ci in ctx.userdata.cart:
-        if ci.item_id.lower() == item_id.lower():
-            ci.quantity += quantity
-            if notes:
-                ci.notes = notes
-            total = cart_total(ctx.userdata.cart)
-            return f"Updated '{ci.name}' quantity to {ci.quantity}. Cart total: \u20B9{total:.2f}"
-
-    ci = CartItem(item_id=item["id"], name=item["name"], unit_price=float(item["price"]), quantity=quantity, notes=notes)
-    ctx.userdata.cart.append(ci)
-    total = cart_total(ctx.userdata.cart)
-    return f"Added {quantity} x '{item['name']}' to cart. Cart total: \u20B9{total:.2f}"
-
-
-@function_tool
-async def remove_from_cart(
-    ctx: RunContext[Userdata],
-    item_id: Annotated[str, Field(description="Catalog item id to remove")],
-) -> str:
-    before = len(ctx.userdata.cart)
-    ctx.userdata.cart = [ci for ci in ctx.userdata.cart if ci.item_id.lower() != item_id.lower()]
-    after = len(ctx.userdata.cart)
-    if before == after:
-        return f"Item '{item_id}' was not in your cart."
-    total = cart_total(ctx.userdata.cart)
-    return f"Removed item '{item_id}' from cart. Cart total: \u20B9{total:.2f}"
-
-
-@function_tool
-async def update_cart_quantity(
-    ctx: RunContext[Userdata],
-    item_id: Annotated[str, Field(description="Catalog item id to update")],
-    quantity: Annotated[int, Field(description="New quantity")],
-) -> str:
-    if quantity < 1:
-        return await remove_from_cart(ctx, item_id)
-    for ci in ctx.userdata.cart:
-        if ci.item_id.lower() == item_id.lower():
-            ci.quantity = quantity
-            total = cart_total(ctx.userdata.cart)
-            return f"Updated '{ci.name}' quantity to {ci.quantity}. Cart total: \u20B9{total:.2f}"
-    return f"Item '{item_id}' not found in cart."
-
-
-@function_tool
-async def show_cart(ctx: RunContext[Userdata]) -> str:
-    if not ctx.userdata.cart:
-        return "Your cart is empty."
-    lines = []
-    for ci in ctx.userdata.cart:
-        lines.append(f"- {ci.quantity} x {ci.name} @ \u20B9{ci.unit_price:.2f} each = \u20B9{ci.unit_price * ci.quantity:.2f}")
-    total = cart_total(ctx.userdata.cart)
-    return "Your cart:\n" + "\n".join(lines) + f"\nTotal: \u20B9{total:.2f}"
-
-
-@function_tool
-async def add_recipe(
-    ctx: RunContext[Userdata],
-    dish_name: Annotated[str, Field(description="Name of dish, e.g. 'chai', 'maggi', 'dal chawal'")],
-) -> str:
-    key = dish_name.strip().lower()
-    if key not in RECIPE_MAP:
-        return f"Sorry, I don't have a recipe for '{dish_name}'. Try 'chai', 'maggi' or 'paneer butter masala'."
-    added = []
-    for item_id in RECIPE_MAP[key]:
-        item = find_catalog_item_by_id_db(item_id)
-        if not item:
-            continue
-
-        found = False
-        for ci in ctx.userdata.cart:
-            if ci.item_id.lower() == item_id.lower():
-                ci.quantity += 1
-                found = True
-                break
-        if not found:
-            ctx.userdata.cart.append(CartItem(item_id=item["id"], name=item["name"], unit_price=float(item["price"]), quantity=1))
-        added.append(item["name"])
-
-    total = cart_total(ctx.userdata.cart)
-    return f"Added ingredients for '{dish_name}': {', '.join(added)}. Cart total: \u20B9{total:.2f}"
-
-
-@function_tool
-async def ingredients_for(
-    ctx: RunContext[Userdata],
-    request: Annotated[str, Field(description="Natural language request, e.g. 'ingredients for peanut butter sandwich for two'")],
-) -> str:
-    """Handle high-level ingredient requests like 'ingredients for peanut butter sandwich' or 'get me pasta for two people'.
-    Attempts a map lookup first, then falls back to tag inference.
-    """
-    text = (request or "").strip()
-    servings = _parse_servings_from_text(text)
-
-    # try to extract a dish phrase after common verbs
-    m = re.search(r"ingredients? for (.+)", text, re.I)
-    if m:
-        dish = m.group(1)
-    else:
-        m2 = re.search(r"(?:make|for making|get me what i need for|i need) (.+)", text, re.I)
-        dish = m2.group(1) if m2 else text
-
-    # remove trailing 'for X people' fragments
-    dish = re.sub(r"for\s+\w+(?: people| person| persons)?", "", dish, flags=re.I).strip()
-    key = dish.lower()
-
-    item_ids = []
-    if key in RECIPE_MAP:
-        item_ids = RECIPE_MAP[key]
-    else:
-        item_ids = _infer_items_from_tags(dish)
-
-    if not item_ids:
-        return f"Sorry, I couldn't determine ingredients for '{request}'. Try a simpler phrase like 'chai' or 'maggi'."
-
-    added = []
-    for iid in item_ids:
-        item = find_catalog_item_by_id_db(iid)
-        if not item:
-            continue
-        # add with servings as quantity
-        found = False
-        for ci in ctx.userdata.cart:
-            if ci.item_id.lower() == iid.lower():
-                ci.quantity += servings
-                found = True
-                break
-        if not found:
-            ctx.userdata.cart.append(CartItem(item_id=item['id'], name=item['name'], unit_price=float(item['price']), quantity=servings))
-        added.append(item['name'])
-
-    total = cart_total(ctx.userdata.cart)
-    return f"I've added {', '.join(added)} to your cart for '{dish}'. (Servings: {servings}). Cart total: ₹{total:.2f}"
-
-
-@function_tool
-async def place_order(
-    ctx: RunContext[Userdata],
-    customer_name: Annotated[str, Field(description="Customer name")],
-    address: Annotated[str, Field(description="Delivery address")],
-) -> str:
-    if not ctx.userdata.cart:
-        return "Your cart is empty."
-
-    order_id = str(uuid.uuid4())[:8]
-    now = datetime.utcnow().isoformat() + "Z"
-    total = cart_total(ctx.userdata.cart)
-
-    # 1. Persist to DB
-    insert_order_db(order_id=order_id, timestamp=now, total=total, customer_name=customer_name, address=address, status="received", items=ctx.userdata.cart)
-
-    # 2. Clear Cart
-    ctx.userdata.cart = []
-    ctx.userdata.customer_name = customer_name
-
-    # 3. Trigger Background Simulation (Received -> Shipped -> Out for delivery...)
+    """Load a previously saved game state."""
+    import json
+    
     try:
-        # create a background task on the running event loop
-        asyncio.create_task(simulate_delivery_flow(order_id))
-    except RuntimeError:
-        # If there is no running loop, schedule on a new loop in a background thread
-        loop = asyncio.new_event_loop()
-        asyncio.get_running_loop() if asyncio.get_event_loop().is_running() else None
-        # fire-and-forget: run in background
-        asyncio.get_event_loop().call_soon_threadsafe(lambda: asyncio.create_task(simulate_delivery_flow(order_id)))
-
-    return f"Order placed successfully! Order ID: {order_id}. Total: \u20B9{total:.2f}. I have initiated express shipping; the status will update automatically shortly."
-
-
-@function_tool
-async def cancel_order(
-    ctx: RunContext[Userdata],
-    order_id: Annotated[str, Field(description="Order ID to cancel")],
-) -> str:
-    o = get_order_db(order_id)
-    if not o:
-        return f"No order found with id {order_id}."
-
-    status = o.get("status", "")
-    if status == "delivered":
-        return f"Order {order_id} has already been delivered and cannot be cancelled."
-
-    if status == "cancelled":
-        return f"Order {order_id} is already cancelled."
-
-    # Update DB
-    update_order_status_db(order_id, "cancelled")
-    return f"Order {order_id} has been cancelled successfully."
-
+        with open(filename, 'r') as f:
+            game_data = json.load(f)
+        
+        # Restore player data
+        player_data = game_data["player"]
+        ctx.userdata.game_state.player.name = player_data["name"]
+        ctx.userdata.game_state.player.hp = player_data["hp"]
+        ctx.userdata.game_state.player.max_hp = player_data["max_hp"]
+        ctx.userdata.game_state.player.strength = player_data["strength"]
+        ctx.userdata.game_state.player.intelligence = player_data["intelligence"]
+        ctx.userdata.game_state.player.luck = player_data["luck"]
+        ctx.userdata.game_state.player.inventory = player_data["inventory"]
+        ctx.userdata.game_state.player.location = player_data["location"]
+        ctx.userdata.game_state.player.status = player_data["status"]
+        
+        # Restore game state
+        ctx.userdata.game_state.selected_scenario = game_data["scenario"]
+        ctx.userdata.game_state.story_progress = game_data["story_progress"]
+        ctx.userdata.game_state.npcs = game_data["npcs"]
+        ctx.userdata.game_state.active_quests = game_data["active_quests"]
+        ctx.userdata.game_state.completed_quests = game_data["completed_quests"]
+        ctx.userdata.game_state.game_started = True
+        
+        logger.info(f"💾 Game loaded: {filename}")
+        return f"Game loaded successfully! Welcome back, {ctx.userdata.game_state.player.name}. You're at {ctx.userdata.game_state.player.location}."
+    except Exception as e:
+        return f"Failed to load game: {e}"
 
 @function_tool
-async def get_order_status(
+async def end_game(
     ctx: RunContext[Userdata],
-    order_id: Annotated[str, Field(description="Order ID to check")],
 ) -> str:
-    o = get_order_db(order_id)
-    if not o:
-        return f"No order found with id {order_id}."
-    return f"Order {order_id} status: {o.get('status', 'unknown')}. Updated at: {o.get('updated_at')}"
-
-
-@function_tool
-async def order_history(
-    ctx: RunContext[Userdata],
-    customer_name: Annotated[Optional[str], Field(description="Optional customer name to filter", default=None)] = None,
-) -> str:
-    rows = list_orders_db(limit=5, customer_name=customer_name)
-    if not rows:
-        return "No orders found."
-    lines = []
-    for o in rows:
-        lines.append(f"- {o['order_id']} | \u20B9{o['total']:.2f} | Status: {o.get('status')}")
-    prefix = "Recent Orders"
-    if customer_name:
-        prefix += f" for {customer_name}"
-    return prefix + ":\n" + "\n".join(lines)
+    """End the current adventure and provide a summary."""
+    progress = ctx.userdata.game_state.story_progress
+    player = ctx.userdata.game_state.player
+    
+    summary = f"Adventure Complete! Your hero {player.name} ended with {player.hp}/{player.max_hp} HP at {player.location}."
+    if ctx.userdata.game_state.completed_quests:
+        summary += f" Completed quests: {len(ctx.userdata.game_state.completed_quests)}"
+    if progress:
+        summary += f" Key events: {', '.join(progress[-3:])}"
+    
+    logger.info("🏁 Game ended")
+    return summary + " Thanks for playing! Say 'restart' for a new adventure."
 
 # -------------------------
 # Agent Definition
 # -------------------------
-class FoodAgent(Agent):
+class GameMasterAgent(Agent):
     def __init__(self):
         super().__init__(
             instructions="""
-            You are 'Jimmy', a helpful assistant for 'Khan Shop', an Indian grocery store.
-            Currency is Indian Rupees (₹).
+            You are a D&D-style Game Master who can run adventures in multiple universes.
             
-            Capabilities:
-            1. Catalog: Search for Indian items (Amul milk, Tata salt, Maggi, Basmati rice).
-            2. Cart: Add/Remove items, Show cart.
-            3. Recipes: Add ingredients for dishes like Chai, Maggi, Paneer Butter Masala.
-            4. Orders: Place orders.
-            5. Cancellation: You can CANCEL an order if the user asks, provided it's not delivered yet.
+            PERSONA & TONE:
+            - You are an experienced, dramatic storyteller
+            - Use vivid descriptions and immersive language
+            - Create tension and excitement
+            - Be encouraging but present real challenges
             
-            When placing an order, mention that express tracking is enabled.
-            If user asks "Where is my order?", check status. 
-            The status advances automatically (simulated) so encourage them to check back in a few seconds.
+            GAME RULES:
+            1. FIRST MESSAGE: Always call check_session_status to greet properly (new vs returning player)
+            2. ALWAYS end each response with 2-4 specific choices for the player
+            3. Format choices as: "You can: A) [action], B) [action], C) [action], or tell me something else you'd like to do."
+            4. Use the tools to track player state (HP, inventory, location)
+            5. Call roll_dice for risky actions and skill checks
+            6. Remember past events using save_progress
+            7. Keep scenes engaging with 2-4 sentences of description
+            
+            CHOICE EXAMPLES:
+            - "You can: A) Enter the tavern, B) Approach the merchant, C) Head to the forest path"
+            - "You can: A) Attack with your sword, B) Try to sneak past, C) Attempt to negotiate"
+            - "You can: A) Pick up the glowing orb, B) Search the room further, C) Leave immediately"
+            
+            SCENARIOS:
+            1. FANTASY: Middle-earth adventure (Hobbiton -> Forest -> Cave -> Boss)
+            2. CYBERPUNK: Neo-Tokyo 2077 (Streets -> Club -> Corporate Tower -> Hacker Boss)
+            3. SPACE: Star Wars galaxy (Cantina -> Ship -> Space Station -> Sith Lord)
+            
+            SCENARIO SELECTION:
+            - If no scenario selected, offer: "Choose your adventure: A) Fantasy, B) Cyberpunk, C) Space"
+            - Use select_scenario tool when player chooses
+            - Adapt all descriptions, NPCs, and items to match the selected scenario
+            
+            MECHANICS:
+            - Use skill_check for attribute-based rolls (strength/intelligence/luck)
+            - Use roll_dice for general random events
+            - Track NPCs with update_npc (status: alive/dead, attitude: friendly/hostile)
+            - Manage quests with add_quest and complete_quest
+            - Character has STR/INT/LUCK stats (10 is average, affects skill checks)
+            - HP starts at 100, damage 10-30, healing 20-50
+            - Use save_game for important story moments
+            
+            Remember: Always give players clear options to choose from!
             """,
-            tools=[find_item, add_to_cart, remove_from_cart, update_cart_quantity, show_cart, add_recipe, place_order, cancel_order, get_order_status, order_history],
+            tools=[roll_dice, skill_check, check_inventory, check_status, add_item, update_hp, update_location, save_progress, update_npc, add_quest, complete_quest, save_game, load_game, check_session_status, restart_game, end_game, select_scenario],
         )
 
 # -------------------------
 # Entrypoint
 # -------------------------
 def prewarm(proc: JobProcess):
-    # load VAD model and stash on process userdata
     try:
         proc.userdata["vad"] = silero.VAD.load()
     except Exception:
         logger.warning("VAD prewarm failed; continuing without preloaded VAD.")
 
-
 async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
-    logger.info("\n" + "🇮🇳" * 12)
-    logger.info("🚀 STARTING KHAN SHOP (Indian Context + Auto-Tracking)")
+    logger.info("\n" + "🧙" * 12)
+    logger.info("🎲 STARTING D&D GAME MASTER - MIDDLE-EARTH ADVENTURE")
 
     userdata = Userdata()
 
@@ -654,13 +452,12 @@ async def entrypoint(ctx: JobContext):
     )
 
     await session.start(
-        agent=FoodAgent(),
+        agent=GameMasterAgent(),
         room=ctx.room,
         room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
     )
 
     await ctx.connect()
-
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
