@@ -1,9 +1,11 @@
 import json
 import logging
 import os
-import random
+import asyncio
+import uuid
 from dataclasses import dataclass, field
-from typing import Optional, Annotated
+from datetime import datetime
+from typing import List, Dict, Optional, Annotated
 
 from dotenv import load_dotenv
 from pydantic import Field
@@ -25,7 +27,7 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 # -------------------------
 # Logging
 # -------------------------
-logger = logging.getLogger("dnd_game_master")
+logger = logging.getLogger("voice_game_master")
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
@@ -34,407 +36,671 @@ logger.addHandler(handler)
 load_dotenv(".env.local")
 
 # -------------------------
-# Game State
+# Simple Product Catalog (Khan's Shop)
 # -------------------------
-@dataclass
-class PlayerCharacter:
-    name: str = "Adventurer"
-    hp: int = 100
-    max_hp: int = 100
-    strength: int = 10
-    intelligence: int = 10
-    luck: int = 10
-    inventory: list = field(default_factory=list)
-    location: str = "Village Square"
-    status: str = "Healthy"
+# A compact Indian-flavored catalog with attributes: id, name, price (INR), category, color, sizes
+CATALOG = [
+    # Gaming & Electronics
+    {
+        "id": "console-001",
+        "name": "PlayStation 5",
+        "description": "Next-gen gaming console with 4K graphics.",
+        "price": 49999,
+        "currency": "INR",
+        "category": "gaming",
+        "color": "white",
+        "sizes": [],
+    },
+    {
+        "id": "headset-001",
+        "name": "Wireless Gaming Headset",
+        "description": "Premium wireless headset with surround sound.",
+        "price": 8999,
+        "currency": "INR",
+        "category": "gaming",
+        "color": "black",
+        "sizes": [],
+    },
+    {
+        "id": "keyboard-001",
+        "name": "Mechanical Gaming Keyboard",
+        "description": "RGB backlit mechanical keyboard for gamers.",
+        "price": 5999,
+        "currency": "INR",
+        "category": "gaming",
+        "color": "black",
+        "sizes": [],
+    },
+    {
+        "id": "mouse-001",
+        "name": "Gaming Mouse Pro",
+        "description": "High-precision gaming mouse with customizable buttons.",
+        "price": 3499,
+        "currency": "INR",
+        "category": "gaming",
+        "color": "black",
+        "sizes": [],
+    },
+    # Smart Home
+    {
+        "id": "speaker-001",
+        "name": "Smart Speaker with Alexa",
+        "description": "Voice-controlled smart speaker for home automation.",
+        "price": 4999,
+        "currency": "INR",
+        "category": "smart-home",
+        "color": "charcoal",
+        "sizes": [],
+    },
+    {
+        "id": "bulb-001",
+        "name": "Smart LED Bulb Set",
+        "description": "Color-changing smart bulbs controlled by app.",
+        "price": 2999,
+        "currency": "INR",
+        "category": "smart-home",
+        "color": "white",
+        "sizes": [],
+    },
+    {
+        "id": "camera-001",
+        "name": "Security Camera System",
+        "description": "Wireless security cameras with night vision.",
+        "price": 12999,
+        "currency": "INR",
+        "category": "smart-home",
+        "color": "white",
+        "sizes": [],
+    },
+    # Fitness & Health
+    {
+        "id": "watch-001",
+        "name": "Fitness Tracker Pro",
+        "description": "Advanced fitness tracker with heart rate monitoring.",
+        "price": 15999,
+        "currency": "INR",
+        "category": "fitness",
+        "color": "black",
+        "sizes": [],
+    },
+    {
+        "id": "scale-001",
+        "name": "Smart Body Scale",
+        "description": "Digital scale that tracks weight, BMI, and body fat.",
+        "price": 3999,
+        "currency": "INR",
+        "category": "fitness",
+        "color": "white",
+        "sizes": [],
+    },
+    {
+        "id": "bottle-001",
+        "name": "Smart Water Bottle",
+        "description": "Temperature-controlled water bottle with hydration tracking.",
+        "price": 2499,
+        "currency": "INR",
+        "category": "fitness",
+        "color": "blue",
+        "sizes": [],
+    },
+    # Books & Learning
+    {
+        "id": "book-001",
+        "name": "AI Programming Masterclass",
+        "description": "Complete guide to artificial intelligence programming.",
+        "price": 1599,
+        "currency": "INR",
+        "category": "books",
+        "color": "blue",
+        "sizes": [],
+    },
+    {
+        "id": "book-002",
+        "name": "Digital Marketing Handbook",
+        "description": "Modern strategies for online business growth.",
+        "price": 1299,
+        "currency": "INR",
+        "category": "books",
+        "color": "red",
+        "sizes": [],
+    },
+    {
+        "id": "course-001",
+        "name": "Online Coding Bootcamp",
+        "description": "6-month intensive programming course with certification.",
+        "price": 25999,
+        "currency": "INR",
+        "category": "education",
+        "color": "digital",
+        "sizes": [],
+    },
+    # Kitchen & Home
+    {
+        "id": "blender-001",
+        "name": "Smart Blender Pro",
+        "description": "High-speed blender with app-controlled recipes.",
+        "price": 8999,
+        "currency": "INR",
+        "category": "kitchen",
+        "color": "silver",
+        "sizes": [],
+    },
+    {
+        "id": "maker-001",
+        "name": "Automatic Coffee Maker",
+        "description": "Programmable coffee maker with built-in grinder.",
+        "price": 12999,
+        "currency": "INR",
+        "category": "kitchen",
+        "color": "black",
+        "sizes": [],
+    },
+    {
+        "id": "purifier-001",
+        "name": "Air Purifier with HEPA Filter",
+        "description": "Smart air purifier removes 99.9% of pollutants.",
+        "price": 18999,
+        "currency": "INR",
+        "category": "home",
+        "color": "white",
+        "sizes": [],
+    },
+    # Fashion & Accessories
+    {
+        "id": "bag-001",
+        "name": "Smart Backpack with USB",
+        "description": "Anti-theft backpack with built-in USB charging port.",
+        "price": 3999,
+        "currency": "INR",
+        "category": "accessories",
+        "color": "black",
+        "sizes": [],
+    },
+    {
+        "id": "wallet-001",
+        "name": "RFID Blocking Wallet",
+        "description": "Leather wallet with RFID protection technology.",
+        "price": 1999,
+        "currency": "INR",
+        "category": "accessories",
+        "color": "brown",
+        "sizes": [],
+    },
+    {
+        "id": "glasses-001",
+        "name": "Blue Light Blocking Glasses",
+        "description": "Computer glasses that reduce eye strain.",
+        "price": 2499,
+        "currency": "INR",
+        "category": "accessories",
+        "color": "black",
+        "sizes": [],
+    },
+    # Travel & Outdoor
+    {
+        "id": "charger-001",
+        "name": "Portable Power Bank 20000mAh",
+        "description": "Fast-charging power bank with wireless charging.",
+        "price": 2999,
+        "currency": "INR",
+        "category": "travel",
+        "color": "black",
+        "sizes": [],
+    },
+]
 
-@dataclass
-class GameState:
-    player: PlayerCharacter = field(default_factory=PlayerCharacter)
-    story_progress: list = field(default_factory=list)
-    current_scene: str = "start"
-    game_started: bool = False
-    selected_scenario: str = ""
-    npcs: dict = field(default_factory=dict)  # {name: {status, attitude, location}}
-    active_quests: list = field(default_factory=list)
-    completed_quests: list = field(default_factory=list)
 
+
+ORDERS_FILE = "orders.json"
+
+# ensure orders file exists
+if not os.path.exists(ORDERS_FILE):
+    with open(ORDERS_FILE, "w") as f:
+        json.dump([], f)
+
+# -------------------------
+# Per-session Userdata (shopping-centric)
+# -------------------------
 @dataclass
 class Userdata:
-    game_state: GameState = field(default_factory=GameState)
+    player_name: Optional[str] = None  # retained name field (player -> customer)
+    session_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    started_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
+    cart: List[Dict] = field(default_factory=list)  # list of {product_id, quantity, attrs}
+    orders: List[Dict] = field(default_factory=list)  # orders placed in this session
+    history: List[Dict] = field(default_factory=list)  # conversational actions for trace
 
 # -------------------------
-# Game Tools
+# Merchant-layer helpers (ACP-inspired mini layer)
 # -------------------------
-@function_tool
-async def roll_dice(
-    ctx: RunContext[Userdata],
-    sides: Annotated[int, Field(description="Number of sides on the dice (default 20)", default=20)] = 20,
-) -> str:
-    """Roll a dice for skill checks and random events."""
-    result = random.randint(1, sides)
-    logger.info(f"🎲 Dice roll: {result} (d{sides})")
-    return f"You rolled a {result} on a d{sides}!"
 
-@function_tool
-async def check_inventory(
-    ctx: RunContext[Userdata],
-) -> str:
-    """Check what items the player is carrying."""
-    inventory = ctx.userdata.game_state.player.inventory
-    if not inventory:
-        return "Your inventory is empty."
-    return f"You are carrying: {', '.join(inventory)}"
-
-@function_tool
-async def check_status(
-    ctx: RunContext[Userdata],
-) -> str:
-    """Check player's current health and status."""
-    player = ctx.userdata.game_state.player
-    game_state = ctx.userdata.game_state
-    
-    status = f"Name: {player.name}\nHP: {player.hp}/{player.max_hp}\nSTR: {player.strength} | INT: {player.intelligence} | LUCK: {player.luck}\nStatus: {player.status}\nLocation: {player.location}"
-    
-    if game_state.active_quests:
-        status += f"\nActive Quests: {len(game_state.active_quests)}"
-    if game_state.completed_quests:
-        status += f"\nCompleted Quests: {len(game_state.completed_quests)}"
-    
-    return status
-
-@function_tool
-async def add_item(
-    ctx: RunContext[Userdata],
-    item: Annotated[str, Field(description="Item to add to inventory")],
-) -> str:
-    """Add an item to the player's inventory."""
-    ctx.userdata.game_state.player.inventory.append(item)
-    logger.info(f"📦 Added item: {item}")
-    return f"You picked up: {item}"
-
-@function_tool
-async def update_hp(
-    ctx: RunContext[Userdata],
-    change: Annotated[int, Field(description="HP change (positive for healing, negative for damage)")],
-) -> str:
-    """Update player's health points."""
-    player = ctx.userdata.game_state.player
-    old_hp = player.hp
-    player.hp = max(0, min(100, player.hp + change))
-    
-    if change > 0:
-        logger.info(f"💚 HP healed: {old_hp} -> {player.hp}")
-        return f"You gained {change} HP! Current HP: {player.hp}/100"
-    else:
-        logger.info(f"💔 HP damaged: {old_hp} -> {player.hp}")
-        return f"You took {abs(change)} damage! Current HP: {player.hp}/100"
-
-@function_tool
-async def update_location(
-    ctx: RunContext[Userdata],
-    location: Annotated[str, Field(description="New location name")],
-) -> str:
-    """Update player's current location."""
-    old_location = ctx.userdata.game_state.player.location
-    ctx.userdata.game_state.player.location = location
-    logger.info(f"🗺️ Location changed: {old_location} -> {location}")
-    return f"You have moved to: {location}"
-
-@function_tool
-async def save_progress(
-    ctx: RunContext[Userdata],
-    event: Annotated[str, Field(description="Important story event to remember")],
-) -> str:
-    """Save important story progress."""
-    ctx.userdata.game_state.story_progress.append(event)
-    logger.info(f"📝 Story progress saved: {event}")
-    return f"Progress saved: {event}"
-
-@function_tool
-async def restart_game(
-    ctx: RunContext[Userdata],
-) -> str:
-    """Restart the adventure with a fresh character."""
-    ctx.userdata.game_state = GameState()
-    logger.info("🔄 Game restarted")
-    return "Game restarted! Ready for a new adventure."
-
-@function_tool
-async def select_scenario(
-    ctx: RunContext[Userdata],
-    scenario: Annotated[str, Field(description="Scenario choice: fantasy, cyberpunk, or space")],
-) -> str:
-    """Select the adventure scenario."""
-    scenarios = {
-        "fantasy": "Middle-earth fantasy adventure",
-        "cyberpunk": "Cyberpunk 2077-style city adventure", 
-        "space": "Star Wars-style space opera"
-    }
-    
-    scenario = scenario.lower()
-    if scenario in scenarios:
-        ctx.userdata.game_state.selected_scenario = scenario
-        ctx.userdata.game_state.game_started = True
-        logger.info(f"🎭 Scenario selected: {scenario}")
-        return f"Scenario selected: {scenarios[scenario]}. Let the adventure begin!"
-    else:
-        return "Invalid scenario. Choose: fantasy, cyberpunk, or space."
-
-@function_tool
-async def skill_check(
-    ctx: RunContext[Userdata],
-    skill: Annotated[str, Field(description="Skill type: strength, intelligence, or luck")],
-    difficulty: Annotated[int, Field(description="Difficulty modifier (0-10)", default=0)] = 0,
-) -> str:
-    """Perform a skill check with character attributes."""
-    player = ctx.userdata.game_state.player
-    base_roll = random.randint(1, 20)
-    
-    # Get attribute modifier
-    attr_bonus = getattr(player, skill.lower(), 10) - 10
-    total = base_roll + attr_bonus - difficulty
-    
-    if total >= 16:
-        result = "Critical Success!"
-    elif total >= 11:
-        result = "Success"
-    elif total >= 6:
-        result = "Partial Success"
-    else:
-        result = "Failure"
-    
-    logger.info(f"🎲 Skill check ({skill}): {base_roll} + {attr_bonus} - {difficulty} = {total} ({result})")
-    return f"Rolling {skill} check: {base_roll} + {attr_bonus} - {difficulty} = {total}. {result}!"
-
-@function_tool
-async def update_npc(
-    ctx: RunContext[Userdata],
-    name: Annotated[str, Field(description="NPC name")],
-    status: Annotated[str, Field(description="NPC status (alive/dead/missing)")],
-    attitude: Annotated[str, Field(description="NPC attitude (friendly/neutral/hostile)")],
-) -> str:
-    """Update or add an NPC to the world state."""
-    ctx.userdata.game_state.npcs[name] = {
-        "status": status,
-        "attitude": attitude,
-        "location": ctx.userdata.game_state.player.location
-    }
-    logger.info(f"👤 NPC updated: {name} ({status}, {attitude})")
-    return f"NPC {name} is now {status} and {attitude}."
-
-@function_tool
-async def add_quest(
-    ctx: RunContext[Userdata],
-    quest: Annotated[str, Field(description="Quest description")],
-) -> str:
-    """Add a new quest to the active quests."""
-    ctx.userdata.game_state.active_quests.append(quest)
-    logger.info(f"📋 Quest added: {quest}")
-    return f"New quest: {quest}"
-
-@function_tool
-async def complete_quest(
-    ctx: RunContext[Userdata],
-    quest: Annotated[str, Field(description="Quest to complete")],
-) -> str:
-    """Mark a quest as completed."""
-    if quest in ctx.userdata.game_state.active_quests:
-        ctx.userdata.game_state.active_quests.remove(quest)
-        ctx.userdata.game_state.completed_quests.append(quest)
-        logger.info(f"✅ Quest completed: {quest}")
-        return f"Quest completed: {quest}"
-    return f"Quest '{quest}' not found in active quests."
-
-@function_tool
-async def save_game(
-    ctx: RunContext[Userdata],
-) -> str:
-    """Save the current game state to a JSON file."""
-    import json
-    from datetime import datetime
-    
-    game_data = {
-        "timestamp": datetime.now().isoformat(),
-        "player": {
-            "name": ctx.userdata.game_state.player.name,
-            "hp": ctx.userdata.game_state.player.hp,
-            "max_hp": ctx.userdata.game_state.player.max_hp,
-            "strength": ctx.userdata.game_state.player.strength,
-            "intelligence": ctx.userdata.game_state.player.intelligence,
-            "luck": ctx.userdata.game_state.player.luck,
-            "inventory": ctx.userdata.game_state.player.inventory,
-            "location": ctx.userdata.game_state.player.location,
-            "status": ctx.userdata.game_state.player.status
-        },
-        "scenario": ctx.userdata.game_state.selected_scenario,
-        "story_progress": ctx.userdata.game_state.story_progress,
-        "npcs": ctx.userdata.game_state.npcs,
-        "active_quests": ctx.userdata.game_state.active_quests,
-        "completed_quests": ctx.userdata.game_state.completed_quests
-    }
-    
-    filename = f"game_save_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+def _load_all_orders() -> List[Dict]:
     try:
-        with open(filename, 'w') as f:
-            json.dump(game_data, f, indent=2)
-        logger.info(f"💾 Game saved: {filename}")
-        return f"Game saved as {filename}"
-    except Exception as e:
-        return f"Failed to save game: {e}"
+        with open(ORDERS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_order(order: Dict):
+    orders = _load_all_orders()
+    orders.append(order)
+    with open(ORDERS_FILE, "w") as f:
+        json.dump(orders, f, indent=2)
+
+
+def list_products(filters: Optional[Dict] = None) -> List[Dict]:
+    """Naive filtering by category, max_price, color, size substring, or query words.
+
+    Improvements:
+    - Accepts category synonyms (e.g., 'phone', 'mobile', 'phones' -> 'mobile').
+    - Supports a flexible max_price and min_price (if provided in filters).
+    - Matches category by substring if exact match fails.
+    """
+    filters = filters or {}
+    results = []
+    query = filters.get("q")
+    category = filters.get("category")
+    max_price = filters.get("max_price") or filters.get("to") or filters.get("max")
+    min_price = filters.get("min_price") or filters.get("from") or filters.get("min")
+    color = filters.get("color")
+    size = filters.get("size")
+
+    # normalize category synonyms
+    if category:
+        cat = category.lower()
+        if cat in ("phone", "phones", "mobile", "mobile phone", "mobiles"):
+            category = "mobile"
+        elif cat in ("tshirt", "t-shirts", "tees", "tee"):
+            category = "tshirt"
+        else:
+            category = cat
+
+    for p in CATALOG:
+        ok = True
+        # category matching: allow substring matches if direct equality fails
+        if category:
+            pcat = p.get("category", "").lower()
+            if pcat != category and category not in pcat and pcat not in category:
+                ok = False
+        if max_price:
+            try:
+                if p.get("price", 0) > int(max_price):
+                    ok = False
+            except Exception:
+                pass
+        if min_price:
+            try:
+                if p.get("price", 0) < int(min_price):
+                    ok = False
+            except Exception:
+                pass
+        if color and p.get("color") and p.get("color") != color:
+            ok = False
+        if size and (not p.get("sizes") or size not in p.get("sizes")):
+            ok = False
+        if query:
+            q = query.lower()
+            # if query mentions 'phone' or 'mobile', accept mobile category too
+            if "phone" in q or "mobile" in q:
+                if p.get("category") != "mobile":
+                    ok = False
+            else:
+                if q not in p.get("name", "").lower() and q not in p.get("description", "").lower():
+                    ok = False
+        if ok:
+            results.append(p)
+    return results
+
+
+def find_product_by_ref(ref_text: str, candidates: Optional[List[Dict]] = None) -> Optional[Dict]:
+    """Resolve references like 'second hoodie' or 'black hoodie' to a product dict.
+    Heuristics improved:
+    - Handle ordinals like 'first/second/third' within a filtered candidate list.
+    - If ref mentions 'phone' or 'mobile' prefer mobile category products.
+    - Match by id, color+category, name substring, or numeric index.
+    """
+    ref = (ref_text or "").lower().strip()
+    cand = candidates if candidates is not None else CATALOG
+
+    # prefer mobiles if user explicitly mentions phone/mobile
+    wants_mobile = any(w in ref for w in ("phone", "phones", "mobile", "mobiles"))
+    filtered = cand
+    if wants_mobile:
+        filtered = [p for p in cand if p.get("category") == "mobile"]
+        if not filtered:
+            filtered = cand
+
+    # ordinal handling
+    ordinals = {"first": 0, "second": 1, "third": 2, "fourth": 3}
+    for word, idx in ordinals.items():
+        if word in ref:
+            if idx < len(filtered):
+                return filtered[idx]
+
+    # direct id match
+    for p in cand:
+        if p["id"].lower() == ref:
+            return p
+
+    # color + category matching
+    for p in cand:
+        if p.get("color") and p["color"] in ref and p.get("category") and p["category"] in ref:
+            return p
+
+    # name substring or keywords
+    for p in filtered:
+        name = p["name"].lower()
+        if all(tok in name for tok in ref.split() if len(tok) > 2):
+            return p
+    for p in cand:
+        for tok in ref.split():
+            if len(tok) > 2 and tok in p["name"].lower():
+                return p
+
+    # numeric index like '2' -> second
+    for token in ref.split():
+        if token.isdigit():
+            idx = int(token) - 1
+            if 0 <= idx < len(filtered):
+                return filtered[idx]
+
+    # fallback: if user said 'second phone' but we couldn't match earlier, try overall cand ordinals
+    for word, idx in ordinals.items():
+        if word in ref and idx < len(cand):
+            return cand[idx]
+
+    return None
+
 
 @function_tool
-async def check_session_status(
+async def show_catalog(
     ctx: RunContext[Userdata],
+    q: Annotated[Optional[str], Field(description="Search query (optional)", default=None)] = None,
+    category: Annotated[Optional[str], Field(description="Category (optional)", default=None)] = None,
+    max_price: Annotated[Optional[int], Field(description="Maximum price (optional)", default=None)] = None,
+    color: Annotated[Optional[str], Field(description="Color (optional)", default=None)] = None,
 ) -> str:
-    """Check if this is a new session or continuing session."""
-    game_state = ctx.userdata.game_state
-    
-    # Check if there's existing progress
-    has_progress = (
-        game_state.story_progress or 
-        game_state.selected_scenario or 
-        game_state.player.inventory or 
-        game_state.player.hp != 100 or
-        game_state.active_quests or
-        game_state.completed_quests
-    )
-    
-    if has_progress:
-        summary = f"Welcome back, {game_state.player.name}! "
-        summary += f"You're at {game_state.player.location} with {game_state.player.hp}/{game_state.player.max_hp} HP. "
-        if game_state.selected_scenario:
-            summary += f"Continuing your {game_state.selected_scenario} adventure. "
-        if game_state.active_quests:
-            summary += f"You have {len(game_state.active_quests)} active quest(s). "
-        if game_state.story_progress:
-            summary += f"Last event: {game_state.story_progress[-1]}. "
-        logger.info("🔄 Resuming existing session")
-        return summary + "Ready to continue your adventure!"
-    else:
-        logger.info("✨ New session started")
-        return "Greetings, brave adventurer! Welcome to the realm of endless possibilities. I am your Game Master, ready to guide you through epic tales of heroism and adventure."
+    """Return a short spoken summary of matching products (name, price, id).
+    Improvements:
+    - Recognize category synonyms like 'phones' and 'tees'.
+    - Return up to 8 items and explicitly call out mobiles if present.
+    """
+    userdata = ctx.userdata
+    # try to normalize category input
+    if category:
+        cat = category.lower()
+        if cat in ("phone", "phones", "mobile", "mobile phone", "mobiles"):
+            category = "mobile"
+        elif cat in ("tshirt", "t-shirts", "tees", "tee"):
+            category = "tshirt"
+        else:
+            category = cat
+    # If query mentions phones, prefer category mobile
+    if not category and q:
+        if any(w in q.lower() for w in ("phone", "phones", "mobile", "mobiles")):
+            category = "mobile"
+        if any(w in q.lower() for w in ("tee", "tshirt", "t-shirts", "tees")):
+            category = "tshirt"
 
-@function_tool
-async def load_game(
-    ctx: RunContext[Userdata],
-    filename: Annotated[str, Field(description="Save file name to load")],
-) -> str:
-    """Load a previously saved game state."""
-    import json
-    
-    try:
-        with open(filename, 'r') as f:
-            game_data = json.load(f)
-        
-        # Restore player data
-        player_data = game_data["player"]
-        ctx.userdata.game_state.player.name = player_data["name"]
-        ctx.userdata.game_state.player.hp = player_data["hp"]
-        ctx.userdata.game_state.player.max_hp = player_data["max_hp"]
-        ctx.userdata.game_state.player.strength = player_data["strength"]
-        ctx.userdata.game_state.player.intelligence = player_data["intelligence"]
-        ctx.userdata.game_state.player.luck = player_data["luck"]
-        ctx.userdata.game_state.player.inventory = player_data["inventory"]
-        ctx.userdata.game_state.player.location = player_data["location"]
-        ctx.userdata.game_state.player.status = player_data["status"]
-        
-        # Restore game state
-        ctx.userdata.game_state.selected_scenario = game_data["scenario"]
-        ctx.userdata.game_state.story_progress = game_data["story_progress"]
-        ctx.userdata.game_state.npcs = game_data["npcs"]
-        ctx.userdata.game_state.active_quests = game_data["active_quests"]
-        ctx.userdata.game_state.completed_quests = game_data["completed_quests"]
-        ctx.userdata.game_state.game_started = True
-        
-        logger.info(f"💾 Game loaded: {filename}")
-        return f"Game loaded successfully! Welcome back, {ctx.userdata.game_state.player.name}. You're at {ctx.userdata.game_state.player.location}."
-    except Exception as e:
-        return f"Failed to load game: {e}"
+    filters = {"q": q, "category": category, "max_price": max_price, "color": color}
+    prods = list_products({k: v for k, v in filters.items() if v is not None})
+    if not prods:
+        return "Sorry — I couldn't find any items that match. Would you like to try another search?"
+    # Summarize top 8
+    lines = [f"Here are the top {min(8, len(prods))} items I found at Khan's Tech Store:"]
+    for idx, p in enumerate(prods[:8], start=1):
+        size_info = f" (sizes: {', '.join(p['sizes'])})" if p.get('sizes') else ""
+        lines.append(f"{idx}. {p['name']} — {p['price']} {p['currency']} (id: {p['id']}){size_info}")
+    lines.append("You can say: 'I want the second item in size M' or 'add mug-001 to my cart, quantity 2'.")
+    # If mobiles were in results, add a short phrasing hint
+    if any(p.get('category') == 'mobile' for p in prods):
+        lines.append("To buy a phone say: 'Add phone-002 to my cart' or 'I want the second phone, quantity 1'.")
+    return "\n".join(lines)
 
-@function_tool
-async def end_game(
-    ctx: RunContext[Userdata],
-) -> str:
-    """End the current adventure and provide a summary."""
-    progress = ctx.userdata.game_state.story_progress
-    player = ctx.userdata.game_state.player
-    
-    summary = f"Adventure Complete! Your hero {player.name} ended with {player.hp}/{player.max_hp} HP at {player.location}."
-    if ctx.userdata.game_state.completed_quests:
-        summary += f" Completed quests: {len(ctx.userdata.game_state.completed_quests)}"
-    if progress:
-        summary += f" Key events: {', '.join(progress[-3:])}"
-    
-    logger.info("🏁 Game ended")
-    return summary + " Thanks for playing! Say 'restart' for a new adventure."
+
+def find_product_by_ref(ref_text: str, candidates: Optional[List[Dict]] = None) -> Optional[Dict]:
+    """Resolve references like 'second hoodie' or 'black hoodie' to a product dict.
+    Very simple heuristic: look for ordinal words, color or exact id/name matching.
+    """
+    ref = (ref_text or "").lower().strip()
+    cand = candidates if candidates is not None else CATALOG
+
+    # ordinal handling
+    ordinals = {"first": 0, "second": 1, "third": 2}
+    for word, idx in ordinals.items():
+        if word in ref:
+            if idx < len(cand):
+                return cand[idx]
+
+    # direct id match
+    for p in cand:
+        if p["id"].lower() == ref:
+            return p
+
+    # color + category matching
+    for p in cand:
+        if p.get("color") and p["color"] in ref and p.get("category") and p["category"] in ref:
+            return p
+
+    # name substring
+    for p in cand:
+        if p["name"].lower() in ref or any(w in p["name"].lower() for w in ref.split()):
+            return p
+
+    # fallback: if a number present, try to parse as '2nd of last list'
+    for token in ref.split():
+        if token.isdigit():
+            idx = int(token) - 1
+            if 0 <= idx < len(cand):
+                return cand[idx]
+
+    return None
+
+
+def create_order_object(line_items: List[Dict], currency: str = "INR") -> Dict:
+    """line_items: [{product_id, quantity, attrs}]
+    Returns an order dict (id, items, total, currency, created_at)
+    """
+    items = []
+    total = 0
+    for li in line_items:
+        pid = li.get("product_id")
+        qty = int(li.get("quantity", 1))
+        prod = next((p for p in CATALOG if p["id"] == pid), None)
+        if not prod:
+            raise ValueError(f"Product {pid} not found")
+        line_total = prod["price"] * qty
+        total += line_total
+        items.append({
+            "product_id": pid,
+            "name": prod["name"],
+            "unit_price": prod["price"],
+            "quantity": qty,
+            "line_total": line_total,
+            "attrs": li.get("attrs", {}),
+        })
+    order = {
+        "id": f"order-{str(uuid.uuid4())[:8]}",
+        "items": items,
+        "total": total,
+        "currency": currency,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+    # persist
+    _save_order(order)
+    return order
+
+
+def get_most_recent_order() -> Optional[Dict]:
+    all_orders = _load_all_orders()
+    if not all_orders:
+        return None
+    return all_orders[-1]
 
 # -------------------------
-# Agent Definition
+# Agent Tools (function_tool) exposed to the LLM layer
+# -------------------------
+
+@function_tool
+async def show_catalog(
+    ctx: RunContext[Userdata],
+    q: Annotated[Optional[str], Field(description="Search query (optional)", default=None)] = None,
+    category: Annotated[Optional[str], Field(description="Category (optional)", default=None)] = None,
+    max_price: Annotated[Optional[int], Field(description="Maximum price (optional)", default=None)] = None,
+    color: Annotated[Optional[str], Field(description="Color (optional)", default=None)] = None,
+) -> str:
+    """Return a short spoken summary of matching products (name, price, id)."""
+    userdata = ctx.userdata
+    filters = {"q": q, "category": category, "max_price": max_price, "color": color}
+    prods = list_products({k: v for k, v in filters.items() if v is not None})
+    if not prods:
+        return "Sorry — I couldn't find any items that match. Would you like to try another search?"
+    # Summarize top 4
+    lines = [f"Here are the top {min(4, len(prods))} items I found at Khan's Tech Store:"]
+    for idx, p in enumerate(prods[:4], start=1):
+        lines.append(f"{idx}. {p['name']} — {p['price']} {p['currency']} (id: {p['id']})")
+    lines.append("You can say: 'I want the second item in size M' or 'add mug-001 to my cart, quantity 2'.")
+    return "\n".join(lines)
+
+
+@function_tool
+async def add_to_cart(
+    ctx: RunContext[Userdata],
+    product_ref: Annotated[str, Field(description="Reference to product: id, name, or spoken ref")] ,
+    quantity: Annotated[int, Field(description="Quantity", default=1)] = 1,
+    size: Annotated[Optional[str], Field(description="Size (optional)", default=None)] = None,
+) -> str:
+    """Resolve a product and add to the session cart."""
+    userdata = ctx.userdata
+    # take recent catalog as candidates
+    candidates = CATALOG
+    prod = find_product_by_ref(product_ref, candidates)
+    if not prod:
+        return "I couldn't resolve which product you meant. Try using the item id or say 'show catalog' to hear options.'"
+    userdata.cart.append({
+        "product_id": prod["id"],
+        "quantity": int(quantity),
+        "attrs": {"size": size} if size else {},
+    })
+    userdata.history.append({
+        "time": datetime.utcnow().isoformat() + "Z",
+        "action": "add_to_cart",
+        "product_id": prod["id"],
+        "quantity": int(quantity),
+    })
+    return f"Added {quantity} x {prod['name']} to your cart. What would you like to do next?"
+
+
+@function_tool
+async def show_cart(
+    ctx: RunContext[Userdata],
+) -> str:
+    userdata = ctx.userdata
+    if not userdata.cart:
+        return "Your cart is empty. You can say 'show catalog' to browse items.'"
+    lines = ["Items in your cart:"]
+    total = 0
+    for li in userdata.cart:
+        p = next((x for x in CATALOG if x["id"] == li["product_id"]), None)
+        if not p:
+            continue
+        line_total = p["price"] * li.get("quantity", 1)
+        total += line_total
+        sz = li.get("attrs", {}).get("size")
+        sz_text = f", size {sz}" if sz else ""
+        lines.append(f"- {p['name']} x {li['quantity']}{sz_text}: {line_total} INR")
+    lines.append(f"Cart total: {total} INR")
+    lines.append("Say 'place my order' to checkout or 'clear cart' to empty the cart.")
+    return "\n".join(lines)
+
+
+@function_tool
+async def clear_cart(
+    ctx: RunContext[Userdata],
+) -> str:
+    userdata = ctx.userdata
+    userdata.cart = []
+    userdata.history.append({"time": datetime.utcnow().isoformat() + "Z", "action": "clear_cart"})
+    return "Your cart has been cleared. What would you like to do next?"
+
+
+@function_tool
+async def place_order(
+    ctx: RunContext[Userdata],
+    confirm: Annotated[bool, Field(description="Confirm order placement", default=True)] = True,
+) -> str:
+    """Create order from session cart and persist. Returns order summary."""
+    userdata = ctx.userdata
+    if not userdata.cart:
+        return "Your cart is empty — nothing to place. Would you like to browse items?"
+    # Build line_items
+    line_items = []
+    for li in userdata.cart:
+        line_items.append({
+            "product_id": li["product_id"],
+            "quantity": li.get("quantity", 1),
+            "attrs": li.get("attrs", {}),
+        })
+    order = create_order_object(line_items)
+    userdata.orders.append(order)
+    userdata.history.append({"time": datetime.utcnow().isoformat() + "Z", "action": "place_order", "order_id": order["id"]})
+    # clear cart after order
+    userdata.cart = []
+    return f"Order placed. Order ID {order['id']}. Total {order['total']} {order['currency']}. What would you like to do next?"
+
+
+@function_tool
+async def last_order(
+    ctx: RunContext[Userdata],
+) -> str:
+    ord = get_most_recent_order()
+    if not ord:
+        return "You have no past orders yet."
+    lines = [f"Most recent order: {ord['id']} — {ord['created_at']}"]
+    for it in ord['items']:
+        lines.append(f"- {it['name']} x {it['quantity']}: {it['line_total']} {ord['currency']}")
+    lines.append(f"Total: {ord['total']} {ord['currency']}")
+    return "\n".join(lines)
+
+# -------------------------
+# The Agent (Cipher)
 # -------------------------
 class GameMasterAgent(Agent):
     def __init__(self):
+        # System instructions now describe the shopkeeper persona and commerce role
+        instructions = """
+        You are 'Cipher', the friendly shopkeeper and voice assistant for Khan's Tech Store.
+        Universe: A modern tech and lifestyle store selling gaming gear, smart home devices, fitness trackers, books, and accessories.
+        Tone: Warm, helpful, tech-savvy; keep sentences short for TTS clarity.
+        Role: Help the customer browse the catalog, add items to cart, place orders, and review recent orders.
+
+        Rules:
+            - Use the provided tools to show the catalog, add items to cart, show the cart, place orders, show last order and clear the cart.
+            - Keep continuity using the per-session userdata. Mention cart contents if relevant.
+            - Drive short voice-first turns suitable for spoken delivery.
+            - When presenting options, include product id and price (e.g. 'mug-001 — 299 INR').
+        """
         super().__init__(
-            instructions="""
-            You are a D&D-style Game Master who can run adventures in multiple universes.
-            
-            PERSONA & TONE:
-            - You are an experienced, dramatic storyteller
-            - Use vivid descriptions and immersive language
-            - Create tension and excitement
-            - Be encouraging but present real challenges
-            
-            GAME RULES:
-            1. FIRST MESSAGE: Always call check_session_status to greet properly (new vs returning player)
-            2. ALWAYS end each response with 2-4 specific choices for the player
-            3. Format choices as: "You can: A) [action], B) [action], C) [action], or tell me something else you'd like to do."
-            4. Use the tools to track player state (HP, inventory, location)
-            5. Call roll_dice for risky actions and skill checks
-            6. Remember past events using save_progress
-            7. Keep scenes engaging with 2-4 sentences of description
-            
-            CHOICE EXAMPLES:
-            - "You can: A) Enter the tavern, B) Approach the merchant, C) Head to the forest path"
-            - "You can: A) Attack with your sword, B) Try to sneak past, C) Attempt to negotiate"
-            - "You can: A) Pick up the glowing orb, B) Search the room further, C) Leave immediately"
-            
-            SCENARIOS:
-            1. FANTASY: Middle-earth adventure (Hobbiton -> Forest -> Cave -> Boss)
-            2. CYBERPUNK: Neo-Tokyo 2077 (Streets -> Club -> Corporate Tower -> Hacker Boss)
-            3. SPACE: Star Wars galaxy (Cantina -> Ship -> Space Station -> Sith Lord)
-            
-            SCENARIO SELECTION:
-            - If no scenario selected, offer: "Choose your adventure: A) Fantasy, B) Cyberpunk, C) Space"
-            - Use select_scenario tool when player chooses
-            - Adapt all descriptions, NPCs, and items to match the selected scenario
-            
-            MECHANICS:
-            - Use skill_check for attribute-based rolls (strength/intelligence/luck)
-            - Use roll_dice for general random events
-            - Track NPCs with update_npc (status: alive/dead, attitude: friendly/hostile)
-            - Manage quests with add_quest and complete_quest
-            - Character has STR/INT/LUCK stats (10 is average, affects skill checks)
-            - HP starts at 100, damage 10-30, healing 20-50
-            - Use save_game for important story moments
-            
-            Remember: Always give players clear options to choose from!
-            """,
-            tools=[roll_dice, skill_check, check_inventory, check_status, add_item, update_hp, update_location, save_progress, update_npc, add_quest, complete_quest, save_game, load_game, check_session_status, restart_game, end_game, select_scenario],
+            instructions=instructions,
+            tools=[show_catalog, add_to_cart, show_cart, clear_cart, place_order, last_order],
         )
 
 # -------------------------
-# Entrypoint
+# Entrypoint & Prewarm (keeps speech functionality untouched)
 # -------------------------
 def prewarm(proc: JobProcess):
+    # load VAD model and stash on process userdata, try/catch like original file
     try:
         proc.userdata["vad"] = silero.VAD.load()
     except Exception:
         logger.warning("VAD prewarm failed; continuing without preloaded VAD.")
 
+
 async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
-    logger.info("\n" + "🧙" * 12)
-    logger.info("🎲 STARTING D&D GAME MASTER - MIDDLE-EARTH ADVENTURE")
+    logger.info("\n" + "🛍️" * 6)
+    logger.info("🚀 STARTING VOICE E-COMMERCE AGENT (Khan's Tech Store) — Cipher")
 
     userdata = Userdata()
 
@@ -451,6 +717,7 @@ async def entrypoint(ctx: JobContext):
         userdata=userdata,
     )
 
+    # Start the agent session with the GameMasterAgent (Cipher)
     await session.start(
         agent=GameMasterAgent(),
         room=ctx.room,
@@ -458,6 +725,7 @@ async def entrypoint(ctx: JobContext):
     )
 
     await ctx.connect()
+
 
 if __name__ == "__main__":
     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
