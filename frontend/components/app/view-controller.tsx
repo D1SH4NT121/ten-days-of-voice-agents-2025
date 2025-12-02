@@ -51,7 +51,12 @@ export function ViewController() {
           key="welcome"
           {...VIEW_MOTION_PROPS}
           startButtonText={appConfig.startButtonText}
-          onStartCall={startSession}
+          onStartCall={(playerName) => {
+            if (playerName) {
+              sessionStorage.setItem('playerName', playerName);
+            }
+            startSession();
+          }}
         />
       )}
       {/* Session view */}
