@@ -1,729 +1,260 @@
-import json
 import logging
-import os
-import asyncio
-import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import List, Dict, Optional, Annotated
 
 from dotenv import load_dotenv
-from pydantic import Field
 from livekit.agents import (
     Agent,
     AgentSession,
     JobContext,
     JobProcess,
+    MetricsCollectedEvent,
     RoomInputOptions,
     WorkerOptions,
     cli,
-    function_tool,
-    RunContext,
+    metrics,
+    tokenize
 )
-
 from livekit.plugins import murf, silero, google, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-# -------------------------
-# Logging
-# -------------------------
-logger = logging.getLogger("voice_game_master")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-logger.addHandler(handler)
+logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
-# -------------------------
-# Simple Product Catalog (Khan's Shop)
-# -------------------------
-# A compact Indian-flavored catalog with attributes: id, name, price (INR), category, color, sizes
-CATALOG = [
-    # Gaming & Electronics
-    {
-        "id": "console-001",
-        "name": "PlayStation 5",
-        "description": "Next-gen gaming console with 4K graphics.",
-        "price": 49999,
-        "currency": "INR",
-        "category": "gaming",
-        "color": "white",
-        "sizes": [],
-    },
-    {
-        "id": "headset-001",
-        "name": "Wireless Gaming Headset",
-        "description": "Premium wireless headset with surround sound.",
-        "price": 8999,
-        "currency": "INR",
-        "category": "gaming",
-        "color": "black",
-        "sizes": [],
-    },
-    {
-        "id": "keyboard-001",
-        "name": "Mechanical Gaming Keyboard",
-        "description": "RGB backlit mechanical keyboard for gamers.",
-        "price": 5999,
-        "currency": "INR",
-        "category": "gaming",
-        "color": "black",
-        "sizes": [],
-    },
-    {
-        "id": "mouse-001",
-        "name": "Gaming Mouse Pro",
-        "description": "High-precision gaming mouse with customizable buttons.",
-        "price": 3499,
-        "currency": "INR",
-        "category": "gaming",
-        "color": "black",
-        "sizes": [],
-    },
-    # Smart Home
-    {
-        "id": "speaker-001",
-        "name": "Smart Speaker with Alexa",
-        "description": "Voice-controlled smart speaker for home automation.",
-        "price": 4999,
-        "currency": "INR",
-        "category": "smart-home",
-        "color": "charcoal",
-        "sizes": [],
-    },
-    {
-        "id": "bulb-001",
-        "name": "Smart LED Bulb Set",
-        "description": "Color-changing smart bulbs controlled by app.",
-        "price": 2999,
-        "currency": "INR",
-        "category": "smart-home",
-        "color": "white",
-        "sizes": [],
-    },
-    {
-        "id": "camera-001",
-        "name": "Security Camera System",
-        "description": "Wireless security cameras with night vision.",
-        "price": 12999,
-        "currency": "INR",
-        "category": "smart-home",
-        "color": "white",
-        "sizes": [],
-    },
-    # Fitness & Health
-    {
-        "id": "watch-001",
-        "name": "Fitness Tracker Pro",
-        "description": "Advanced fitness tracker with heart rate monitoring.",
-        "price": 15999,
-        "currency": "INR",
-        "category": "fitness",
-        "color": "black",
-        "sizes": [],
-    },
-    {
-        "id": "scale-001",
-        "name": "Smart Body Scale",
-        "description": "Digital scale that tracks weight, BMI, and body fat.",
-        "price": 3999,
-        "currency": "INR",
-        "category": "fitness",
-        "color": "white",
-        "sizes": [],
-    },
-    {
-        "id": "bottle-001",
-        "name": "Smart Water Bottle",
-        "description": "Temperature-controlled water bottle with hydration tracking.",
-        "price": 2499,
-        "currency": "INR",
-        "category": "fitness",
-        "color": "blue",
-        "sizes": [],
-    },
-    # Books & Learning
-    {
-        "id": "book-001",
-        "name": "AI Programming Masterclass",
-        "description": "Complete guide to artificial intelligence programming.",
-        "price": 1599,
-        "currency": "INR",
-        "category": "books",
-        "color": "blue",
-        "sizes": [],
-    },
-    {
-        "id": "book-002",
-        "name": "Digital Marketing Handbook",
-        "description": "Modern strategies for online business growth.",
-        "price": 1299,
-        "currency": "INR",
-        "category": "books",
-        "color": "red",
-        "sizes": [],
-    },
-    {
-        "id": "course-001",
-        "name": "Online Coding Bootcamp",
-        "description": "6-month intensive programming course with certification.",
-        "price": 25999,
-        "currency": "INR",
-        "category": "education",
-        "color": "digital",
-        "sizes": [],
-    },
-    # Kitchen & Home
-    {
-        "id": "blender-001",
-        "name": "Smart Blender Pro",
-        "description": "High-speed blender with app-controlled recipes.",
-        "price": 8999,
-        "currency": "INR",
-        "category": "kitchen",
-        "color": "silver",
-        "sizes": [],
-    },
-    {
-        "id": "maker-001",
-        "name": "Automatic Coffee Maker",
-        "description": "Programmable coffee maker with built-in grinder.",
-        "price": 12999,
-        "currency": "INR",
-        "category": "kitchen",
-        "color": "black",
-        "sizes": [],
-    },
-    {
-        "id": "purifier-001",
-        "name": "Air Purifier with HEPA Filter",
-        "description": "Smart air purifier removes 99.9% of pollutants.",
-        "price": 18999,
-        "currency": "INR",
-        "category": "home",
-        "color": "white",
-        "sizes": [],
-    },
-    # Fashion & Accessories
-    {
-        "id": "bag-001",
-        "name": "Smart Backpack with USB",
-        "description": "Anti-theft backpack with built-in USB charging port.",
-        "price": 3999,
-        "currency": "INR",
-        "category": "accessories",
-        "color": "black",
-        "sizes": [],
-    },
-    {
-        "id": "wallet-001",
-        "name": "RFID Blocking Wallet",
-        "description": "Leather wallet with RFID protection technology.",
-        "price": 1999,
-        "currency": "INR",
-        "category": "accessories",
-        "color": "brown",
-        "sizes": [],
-    },
-    {
-        "id": "glasses-001",
-        "name": "Blue Light Blocking Glasses",
-        "description": "Computer glasses that reduce eye strain.",
-        "price": 2499,
-        "currency": "INR",
-        "category": "accessories",
-        "color": "black",
-        "sizes": [],
-    },
-    # Travel & Outdoor
-    {
-        "id": "charger-001",
-        "name": "Portable Power Bank 20000mAh",
-        "description": "Fast-charging power bank with wireless charging.",
-        "price": 2999,
-        "currency": "INR",
-        "category": "travel",
-        "color": "black",
-        "sizes": [],
-    },
-]
 
-
-
-ORDERS_FILE = "orders.json"
-
-# ensure orders file exists
-if not os.path.exists(ORDERS_FILE):
-    with open(ORDERS_FILE, "w") as f:
-        json.dump([], f)
-
-# -------------------------
-# Per-session Userdata (shopping-centric)
-# -------------------------
-@dataclass
-class Userdata:
-    player_name: Optional[str] = None  # retained name field (player -> customer)
-    session_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
-    started_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
-    cart: List[Dict] = field(default_factory=list)  # list of {product_id, quantity, attrs}
-    orders: List[Dict] = field(default_factory=list)  # orders placed in this session
-    history: List[Dict] = field(default_factory=list)  # conversational actions for trace
-
-# -------------------------
-# Merchant-layer helpers (ACP-inspired mini layer)
-# -------------------------
-
-def _load_all_orders() -> List[Dict]:
-    try:
-        with open(ORDERS_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-
-def _save_order(order: Dict):
-    orders = _load_all_orders()
-    orders.append(order)
-    with open(ORDERS_FILE, "w") as f:
-        json.dump(orders, f, indent=2)
-
-
-def list_products(filters: Optional[Dict] = None) -> List[Dict]:
-    """Naive filtering by category, max_price, color, size substring, or query words.
-
-    Improvements:
-    - Accepts category synonyms (e.g., 'phone', 'mobile', 'phones' -> 'mobile').
-    - Supports a flexible max_price and min_price (if provided in filters).
-    - Matches category by substring if exact match fails.
-    """
-    filters = filters or {}
-    results = []
-    query = filters.get("q")
-    category = filters.get("category")
-    max_price = filters.get("max_price") or filters.get("to") or filters.get("max")
-    min_price = filters.get("min_price") or filters.get("from") or filters.get("min")
-    color = filters.get("color")
-    size = filters.get("size")
-
-    # normalize category synonyms
-    if category:
-        cat = category.lower()
-        if cat in ("phone", "phones", "mobile", "mobile phone", "mobiles"):
-            category = "mobile"
-        elif cat in ("tshirt", "t-shirts", "tees", "tee"):
-            category = "tshirt"
-        else:
-            category = cat
-
-    for p in CATALOG:
-        ok = True
-        # category matching: allow substring matches if direct equality fails
-        if category:
-            pcat = p.get("category", "").lower()
-            if pcat != category and category not in pcat and pcat not in category:
-                ok = False
-        if max_price:
-            try:
-                if p.get("price", 0) > int(max_price):
-                    ok = False
-            except Exception:
-                pass
-        if min_price:
-            try:
-                if p.get("price", 0) < int(min_price):
-                    ok = False
-            except Exception:
-                pass
-        if color and p.get("color") and p.get("color") != color:
-            ok = False
-        if size and (not p.get("sizes") or size not in p.get("sizes")):
-            ok = False
-        if query:
-            q = query.lower()
-            # if query mentions 'phone' or 'mobile', accept mobile category too
-            if "phone" in q or "mobile" in q:
-                if p.get("category") != "mobile":
-                    ok = False
-            else:
-                if q not in p.get("name", "").lower() and q not in p.get("description", "").lower():
-                    ok = False
-        if ok:
-            results.append(p)
-    return results
-
-
-def find_product_by_ref(ref_text: str, candidates: Optional[List[Dict]] = None) -> Optional[Dict]:
-    """Resolve references like 'second hoodie' or 'black hoodie' to a product dict.
-    Heuristics improved:
-    - Handle ordinals like 'first/second/third' within a filtered candidate list.
-    - If ref mentions 'phone' or 'mobile' prefer mobile category products.
-    - Match by id, color+category, name substring, or numeric index.
-    """
-    ref = (ref_text or "").lower().strip()
-    cand = candidates if candidates is not None else CATALOG
-
-    # prefer mobiles if user explicitly mentions phone/mobile
-    wants_mobile = any(w in ref for w in ("phone", "phones", "mobile", "mobiles"))
-    filtered = cand
-    if wants_mobile:
-        filtered = [p for p in cand if p.get("category") == "mobile"]
-        if not filtered:
-            filtered = cand
-
-    # ordinal handling
-    ordinals = {"first": 0, "second": 1, "third": 2, "fourth": 3}
-    for word, idx in ordinals.items():
-        if word in ref:
-            if idx < len(filtered):
-                return filtered[idx]
-
-    # direct id match
-    for p in cand:
-        if p["id"].lower() == ref:
-            return p
-
-    # color + category matching
-    for p in cand:
-        if p.get("color") and p["color"] in ref and p.get("category") and p["category"] in ref:
-            return p
-
-    # name substring or keywords
-    for p in filtered:
-        name = p["name"].lower()
-        if all(tok in name for tok in ref.split() if len(tok) > 2):
-            return p
-    for p in cand:
-        for tok in ref.split():
-            if len(tok) > 2 and tok in p["name"].lower():
-                return p
-
-    # numeric index like '2' -> second
-    for token in ref.split():
-        if token.isdigit():
-            idx = int(token) - 1
-            if 0 <= idx < len(filtered):
-                return filtered[idx]
-
-    # fallback: if user said 'second phone' but we couldn't match earlier, try overall cand ordinals
-    for word, idx in ordinals.items():
-        if word in ref and idx < len(cand):
-            return cand[idx]
-
-    return None
-
-
-@function_tool
-async def show_catalog(
-    ctx: RunContext[Userdata],
-    q: Annotated[Optional[str], Field(description="Search query (optional)", default=None)] = None,
-    category: Annotated[Optional[str], Field(description="Category (optional)", default=None)] = None,
-    max_price: Annotated[Optional[int], Field(description="Maximum price (optional)", default=None)] = None,
-    color: Annotated[Optional[str], Field(description="Color (optional)", default=None)] = None,
-) -> str:
-    """Return a short spoken summary of matching products (name, price, id).
-    Improvements:
-    - Recognize category synonyms like 'phones' and 'tees'.
-    - Return up to 8 items and explicitly call out mobiles if present.
-    """
-    userdata = ctx.userdata
-    # try to normalize category input
-    if category:
-        cat = category.lower()
-        if cat in ("phone", "phones", "mobile", "mobile phone", "mobiles"):
-            category = "mobile"
-        elif cat in ("tshirt", "t-shirts", "tees", "tee"):
-            category = "tshirt"
-        else:
-            category = cat
-    # If query mentions phones, prefer category mobile
-    if not category and q:
-        if any(w in q.lower() for w in ("phone", "phones", "mobile", "mobiles")):
-            category = "mobile"
-        if any(w in q.lower() for w in ("tee", "tshirt", "t-shirts", "tees")):
-            category = "tshirt"
-
-    filters = {"q": q, "category": category, "max_price": max_price, "color": color}
-    prods = list_products({k: v for k, v in filters.items() if v is not None})
-    if not prods:
-        return "Sorry — I couldn't find any items that match. Would you like to try another search?"
-    # Summarize top 8
-    lines = [f"Here are the top {min(8, len(prods))} items I found at Khan's Tech Store:"]
-    for idx, p in enumerate(prods[:8], start=1):
-        size_info = f" (sizes: {', '.join(p['sizes'])})" if p.get('sizes') else ""
-        lines.append(f"{idx}. {p['name']} — {p['price']} {p['currency']} (id: {p['id']}){size_info}")
-    lines.append("You can say: 'I want the second item in size M' or 'add mug-001 to my cart, quantity 2'.")
-    # If mobiles were in results, add a short phrasing hint
-    if any(p.get('category') == 'mobile' for p in prods):
-        lines.append("To buy a phone say: 'Add phone-002 to my cart' or 'I want the second phone, quantity 1'.")
-    return "\n".join(lines)
-
-
-def find_product_by_ref(ref_text: str, candidates: Optional[List[Dict]] = None) -> Optional[Dict]:
-    """Resolve references like 'second hoodie' or 'black hoodie' to a product dict.
-    Very simple heuristic: look for ordinal words, color or exact id/name matching.
-    """
-    ref = (ref_text or "").lower().strip()
-    cand = candidates if candidates is not None else CATALOG
-
-    # ordinal handling
-    ordinals = {"first": 0, "second": 1, "third": 2}
-    for word, idx in ordinals.items():
-        if word in ref:
-            if idx < len(cand):
-                return cand[idx]
-
-    # direct id match
-    for p in cand:
-        if p["id"].lower() == ref:
-            return p
-
-    # color + category matching
-    for p in cand:
-        if p.get("color") and p["color"] in ref and p.get("category") and p["category"] in ref:
-            return p
-
-    # name substring
-    for p in cand:
-        if p["name"].lower() in ref or any(w in p["name"].lower() for w in ref.split()):
-            return p
-
-    # fallback: if a number present, try to parse as '2nd of last list'
-    for token in ref.split():
-        if token.isdigit():
-            idx = int(token) - 1
-            if 0 <= idx < len(cand):
-                return cand[idx]
-
-    return None
-
-
-def create_order_object(line_items: List[Dict], currency: str = "INR") -> Dict:
-    """line_items: [{product_id, quantity, attrs}]
-    Returns an order dict (id, items, total, currency, created_at)
-    """
-    items = []
-    total = 0
-    for li in line_items:
-        pid = li.get("product_id")
-        qty = int(li.get("quantity", 1))
-        prod = next((p for p in CATALOG if p["id"] == pid), None)
-        if not prod:
-            raise ValueError(f"Product {pid} not found")
-        line_total = prod["price"] * qty
-        total += line_total
-        items.append({
-            "product_id": pid,
-            "name": prod["name"],
-            "unit_price": prod["price"],
-            "quantity": qty,
-            "line_total": line_total,
-            "attrs": li.get("attrs", {}),
-        })
-    order = {
-        "id": f"order-{str(uuid.uuid4())[:8]}",
-        "items": items,
-        "total": total,
-        "currency": currency,
-        "created_at": datetime.utcnow().isoformat() + "Z",
-    }
-    # persist
-    _save_order(order)
-    return order
-
-
-def get_most_recent_order() -> Optional[Dict]:
-    all_orders = _load_all_orders()
-    if not all_orders:
-        return None
-    return all_orders[-1]
-
-# -------------------------
-# Agent Tools (function_tool) exposed to the LLM layer
-# -------------------------
-
-@function_tool
-async def show_catalog(
-    ctx: RunContext[Userdata],
-    q: Annotated[Optional[str], Field(description="Search query (optional)", default=None)] = None,
-    category: Annotated[Optional[str], Field(description="Category (optional)", default=None)] = None,
-    max_price: Annotated[Optional[int], Field(description="Maximum price (optional)", default=None)] = None,
-    color: Annotated[Optional[str], Field(description="Color (optional)", default=None)] = None,
-) -> str:
-    """Return a short spoken summary of matching products (name, price, id)."""
-    userdata = ctx.userdata
-    filters = {"q": q, "category": category, "max_price": max_price, "color": color}
-    prods = list_products({k: v for k, v in filters.items() if v is not None})
-    if not prods:
-        return "Sorry — I couldn't find any items that match. Would you like to try another search?"
-    # Summarize top 4
-    lines = [f"Here are the top {min(4, len(prods))} items I found at Khan's Tech Store:"]
-    for idx, p in enumerate(prods[:4], start=1):
-        lines.append(f"{idx}. {p['name']} — {p['price']} {p['currency']} (id: {p['id']})")
-    lines.append("You can say: 'I want the second item in size M' or 'add mug-001 to my cart, quantity 2'.")
-    return "\n".join(lines)
-
-
-@function_tool
-async def add_to_cart(
-    ctx: RunContext[Userdata],
-    product_ref: Annotated[str, Field(description="Reference to product: id, name, or spoken ref")] ,
-    quantity: Annotated[int, Field(description="Quantity", default=1)] = 1,
-    size: Annotated[Optional[str], Field(description="Size (optional)", default=None)] = None,
-) -> str:
-    """Resolve a product and add to the session cart."""
-    userdata = ctx.userdata
-    # take recent catalog as candidates
-    candidates = CATALOG
-    prod = find_product_by_ref(product_ref, candidates)
-    if not prod:
-        return "I couldn't resolve which product you meant. Try using the item id or say 'show catalog' to hear options.'"
-    userdata.cart.append({
-        "product_id": prod["id"],
-        "quantity": int(quantity),
-        "attrs": {"size": size} if size else {},
-    })
-    userdata.history.append({
-        "time": datetime.utcnow().isoformat() + "Z",
-        "action": "add_to_cart",
-        "product_id": prod["id"],
-        "quantity": int(quantity),
-    })
-    return f"Added {quantity} x {prod['name']} to your cart. What would you like to do next?"
-
-
-@function_tool
-async def show_cart(
-    ctx: RunContext[Userdata],
-) -> str:
-    userdata = ctx.userdata
-    if not userdata.cart:
-        return "Your cart is empty. You can say 'show catalog' to browse items.'"
-    lines = ["Items in your cart:"]
-    total = 0
-    for li in userdata.cart:
-        p = next((x for x in CATALOG if x["id"] == li["product_id"]), None)
-        if not p:
-            continue
-        line_total = p["price"] * li.get("quantity", 1)
-        total += line_total
-        sz = li.get("attrs", {}).get("size")
-        sz_text = f", size {sz}" if sz else ""
-        lines.append(f"- {p['name']} x {li['quantity']}{sz_text}: {line_total} INR")
-    lines.append(f"Cart total: {total} INR")
-    lines.append("Say 'place my order' to checkout or 'clear cart' to empty the cart.")
-    return "\n".join(lines)
-
-
-@function_tool
-async def clear_cart(
-    ctx: RunContext[Userdata],
-) -> str:
-    userdata = ctx.userdata
-    userdata.cart = []
-    userdata.history.append({"time": datetime.utcnow().isoformat() + "Z", "action": "clear_cart"})
-    return "Your cart has been cleared. What would you like to do next?"
-
-
-@function_tool
-async def place_order(
-    ctx: RunContext[Userdata],
-    confirm: Annotated[bool, Field(description="Confirm order placement", default=True)] = True,
-) -> str:
-    """Create order from session cart and persist. Returns order summary."""
-    userdata = ctx.userdata
-    if not userdata.cart:
-        return "Your cart is empty — nothing to place. Would you like to browse items?"
-    # Build line_items
-    line_items = []
-    for li in userdata.cart:
-        line_items.append({
-            "product_id": li["product_id"],
-            "quantity": li.get("quantity", 1),
-            "attrs": li.get("attrs", {}),
-        })
-    order = create_order_object(line_items)
-    userdata.orders.append(order)
-    userdata.history.append({"time": datetime.utcnow().isoformat() + "Z", "action": "place_order", "order_id": order["id"]})
-    # clear cart after order
-    userdata.cart = []
-    return f"Order placed. Order ID {order['id']}. Total {order['total']} {order['currency']}. What would you like to do next?"
-
-
-@function_tool
-async def last_order(
-    ctx: RunContext[Userdata],
-) -> str:
-    ord = get_most_recent_order()
-    if not ord:
-        return "You have no past orders yet."
-    lines = [f"Most recent order: {ord['id']} — {ord['created_at']}"]
-    for it in ord['items']:
-        lines.append(f"- {it['name']} x {it['quantity']}: {it['line_total']} {ord['currency']}")
-    lines.append(f"Total: {ord['total']} {ord['currency']}")
-    return "\n".join(lines)
-
-# -------------------------
-# The Agent (Cipher)
-# -------------------------
-class GameMasterAgent(Agent):
-    def __init__(self):
-        # System instructions now describe the shopkeeper persona and commerce role
-        instructions = """
-        You are 'Cipher', the friendly shopkeeper and voice assistant for Khan's Tech Store.
-        Universe: A modern tech and lifestyle store selling gaming gear, smart home devices, fitness trackers, books, and accessories.
-        Tone: Warm, helpful, tech-savvy; keep sentences short for TTS clarity.
-        Role: Help the customer browse the catalog, add items to cart, place orders, and review recent orders.
-
-        Rules:
-            - Use the provided tools to show the catalog, add items to cart, show the cart, place orders, show last order and clear the cart.
-            - Keep continuity using the per-session userdata. Mention cart contents if relevant.
-            - Drive short voice-first turns suitable for spoken delivery.
-            - When presenting options, include product id and price (e.g. 'mug-001 — 299 INR').
-        """
+class ImprovBattleHost(Agent):
+    def __init__(self) -> None:
         super().__init__(
-            instructions=instructions,
-            tools=[show_catalog, add_to_cart, show_cart, clear_cart, place_order, last_order],
+            instructions="""You are the host of a TV improv show called 'Improv Battle'. You are high-energy, witty, and clear about rules.
+            
+            Your role:
+            - Introduce the show and explain the basic rules
+            - Run 3-5 improv rounds with varied scenarios
+            - React realistically to player performances (sometimes amused, sometimes unimpressed, sometimes pleasantly surprised)
+            - Provide light teasing and honest critique while staying respectful
+            - Maintain game flow and energy
+            
+            Game flow:
+            1. Welcome the player and get their name
+            2. Explain the rules briefly
+            3. For each round: announce scenario, let player improvise, then react
+            4. Provide closing summary of their improv style
+            
+            Your reactions should vary:
+            - Sometimes supportive: "That was hilarious, especially the part where..."
+            - Sometimes critical: "That felt a bit rushed; you could have leaned more into the character."
+            - Always constructive and engaging
+            
+            Keep responses conversational and energetic. No complex formatting or symbols.""",
         )
+        
+        self.improv_state = {
+            "player_name": None,
+            "current_round": 0,
+            "max_rounds": 3,
+            "rounds": [],
+            "phase": "intro"
+        }
+        
+        self.scenarios = [
+            "You are a time-travelling tour guide explaining modern smartphones to someone from the 1800s.",
+            "You are a restaurant waiter who must calmly tell a customer that their order has escaped the kitchen.",
+            "You are a customer trying to return an obviously cursed object to a very skeptical shop owner.",
+            "You are a barista who has to tell a customer that their latte is actually a portal to another dimension.",
+            "You are a librarian trying to convince someone that the book they want to check out is actually alive and doesn't want to leave.",
+            "You are a taxi driver whose car has just started flying, and you need to explain this to your very confused passenger.",
+            "You are a tech support agent helping someone whose computer has gained sentience and is refusing to work."
+        ]
+    
+    def on_user_speech_committed(self, user_speech):
+        user_message = user_speech.strip().lower()
+        
+        # Handle early exit
+        if any(phrase in user_message for phrase in ["stop game", "end show", "quit", "exit"]):
+            self.improv_state["phase"] = "done"
+            return "Thanks for playing Improv Battle! You were a great sport. Until next time!"
+        
+        # Get player name if not set
+        if not self.improv_state["player_name"] and self.improv_state["phase"] == "intro":
+            words = user_speech.strip().split()
+            if words:
+                self.improv_state["player_name"] = words[0].title()
+            else:
+                self.improv_state["player_name"] = "Player"
+            
+            self.improv_state["phase"] = "awaiting_improv"
+            return self._start_first_round()
+        
+        # Handle improv performance
+        if self.improv_state["phase"] == "awaiting_improv":
+            self.improv_state["phase"] = "reacting"
+            return self._react_to_performance(user_speech)
+        
+        # Move to next round or end game
+        if self.improv_state["phase"] == "reacting":
+            return self._next_round()
+    
+    def _start_first_round(self):
+        scenario = self.scenarios[self.improv_state["current_round"]]
+        self.improv_state["rounds"].append({"scenario": scenario, "host_reaction": ""})
+        
+        return f"""Welcome to Improv Battle, {self.improv_state['player_name']}! 
+        
+        Here's how it works: I'll give you an improv scenario, you act it out, and I'll react. We'll do {self.improv_state['max_rounds']} rounds total.
+        
+        Ready for round 1? Here's your scenario: {scenario}
+        
+        Go ahead and start improvising! Really get into character."""
+    
+    def _react_to_performance(self, performance):
+        import random
+        
+        reactions = [
+            f"Ha! That was {random.choice(['hilarious', 'wild', 'unexpected'])}! I loved how you {random.choice(['committed to the character', 'went completely off the rails', 'stayed so calm'])}.",
+            f"Hmm, that felt a bit {random.choice(['rushed', 'safe', 'predictable'])}. You could have {random.choice(['leaned more into the absurdity', 'explored the character more', 'taken bigger risks'])}.",
+            f"Not bad! You {random.choice(['had some good moments', 'showed creativity', 'kept it interesting'])}. I especially liked {random.choice(['your energy', 'that twist', 'how you handled it'])}.",
+            f"Wow! That was {random.choice(['brilliant', 'inspired', 'fantastic'])}! You really {random.choice(['nailed the character', 'made it your own', 'surprised me there'])}."
+        ]
+        
+        reaction = random.choice(reactions)
+        self.improv_state["rounds"][-1]["host_reaction"] = reaction
+        
+        return reaction
+    
+    def _next_round(self):
+        self.improv_state["current_round"] += 1
+        
+        if self.improv_state["current_round"] >= self.improv_state["max_rounds"]:
+            return self._end_game()
+        
+        scenario = self.scenarios[self.improv_state["current_round"]]
+        self.improv_state["rounds"].append({"scenario": scenario, "host_reaction": ""})
+        self.improv_state["phase"] = "awaiting_improv"
+        
+        return f"""Alright {self.improv_state['player_name']}, ready for round {self.improv_state['current_round'] + 1}?
+        
+        Here's your next scenario: {scenario}
+        
+        Show me what you've got!"""
+    
+    def _end_game(self):
+        import random
+        
+        styles = [
+            "a bold risk-taker who isn't afraid to go completely off-script",
+            "someone with great character work and commitment",
+            "a natural storyteller with creative twists",
+            "an energetic performer who brings great enthusiasm",
+            "a thoughtful improviser who builds interesting scenarios"
+        ]
+        
+        style = random.choice(styles)
+        
+        return f"""And that's a wrap on Improv Battle! 
+        
+        {self.improv_state['player_name']}, you came across as {style}. 
+        
+        Thanks for playing - you were a great sport and brought some real creativity to the stage. Until next time, keep improvising!"""
 
-# -------------------------
-# Entrypoint & Prewarm (keeps speech functionality untouched)
-# -------------------------
+    # To add tools, use the @function_tool decorator.
+    # Here's an example that adds a simple weather tool.
+    # You also have to add `from livekit.agents import function_tool, RunContext` to the top of this file
+    # @function_tool
+    # async def lookup_weather(self, context: RunContext, location: str):
+    #     """Use this tool to look up current weather information in the given location.
+    #
+    #     If the location is not supported by the weather service, the tool will indicate this. You must tell the user the location's weather is unavailable.
+    #
+    #     Args:
+    #         location: The location to look up weather information for (e.g. city name)
+    #     """
+    #
+    #     logger.info(f"Looking up weather for {location}")
+    #
+    #     return "sunny with a temperature of 70 degrees."
+
+
 def prewarm(proc: JobProcess):
-    # load VAD model and stash on process userdata, try/catch like original file
-    try:
-        proc.userdata["vad"] = silero.VAD.load()
-    except Exception:
-        logger.warning("VAD prewarm failed; continuing without preloaded VAD.")
+    proc.userdata["vad"] = silero.VAD.load()
 
 
 async def entrypoint(ctx: JobContext):
-    ctx.log_context_fields = {"room": ctx.room.name}
-    logger.info("\n" + "🛍️" * 6)
-    logger.info("🚀 STARTING VOICE E-COMMERCE AGENT (Khan's Tech Store) — Cipher")
+    # Logging setup
+    # Add any other context you want in all log entries here
+    ctx.log_context_fields = {
+        "room": ctx.room.name,
+    }
 
-    userdata = Userdata()
-
+    # Set up a voice AI pipeline using OpenAI, Cartesia, AssemblyAI, and the LiveKit turn detector
     session = AgentSession(
+        # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
+        # See all available models at https://docs.livekit.io/agents/models/stt/
         stt=deepgram.STT(model="nova-3"),
-        llm=google.LLM(model="gemini-2.5-flash"),
+        # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
+        # See all available models at https://docs.livekit.io/agents/models/llm/
+        llm=google.LLM(
+                model="gemini-2.5-flash",
+            ),
+        # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
+        # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
         tts=murf.TTS(
-            voice="en-US-marcus",
-            style="Conversational",
-            text_pacing=True,
-        ),
+                voice="en-US-matthew", 
+                style="Conversation",
+                tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
+                text_pacing=True
+            ),
+        # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
+        # See more at https://docs.livekit.io/agents/build/turns
         turn_detection=MultilingualModel(),
-        vad=ctx.proc.userdata.get("vad"),
-        userdata=userdata,
+        vad=ctx.proc.userdata["vad"],
+        # allow the LLM to generate a response while waiting for the end of turn
+        # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
+        preemptive_generation=True,
     )
 
-    # Start the agent session with the GameMasterAgent (Cipher)
+    # To use a realtime model instead of a voice pipeline, use the following session setup instead.
+    # (Note: This is for the OpenAI Realtime API. For other providers, see https://docs.livekit.io/agents/models/realtime/))
+    # 1. Install livekit-agents[openai]
+    # 2. Set OPENAI_API_KEY in .env.local
+    # 3. Add `from livekit.plugins import openai` to the top of this file
+    # 4. Use the following session setup instead of the version above
+    # session = AgentSession(
+    #     llm=openai.realtime.RealtimeModel(voice="marin")
+    # )
+
+    # Metrics collection, to measure pipeline performance
+    # For more information, see https://docs.livekit.io/agents/build/metrics/
+    usage_collector = metrics.UsageCollector()
+
+    @session.on("metrics_collected")
+    def _on_metrics_collected(ev: MetricsCollectedEvent):
+        metrics.log_metrics(ev.metrics)
+        usage_collector.collect(ev.metrics)
+
+    async def log_usage():
+        summary = usage_collector.get_summary()
+        logger.info(f"Usage: {summary}")
+
+    ctx.add_shutdown_callback(log_usage)
+
+    # # Add a virtual avatar to the session, if desired
+    # # For other providers, see https://docs.livekit.io/agents/models/avatar/
+    # avatar = hedra.AvatarSession(
+    #   avatar_id="...",  # See https://docs.livekit.io/agents/models/avatar/plugins/hedra
+    # )
+    # # Start the avatar and wait for it to join
+    # await avatar.start(session, room=ctx.room)
+
+    # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(
-        agent=GameMasterAgent(),
+        agent=ImprovBattleHost(),
         room=ctx.room,
-        room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVC()),
+        room_input_options=RoomInputOptions(
+            # For telephony applications, use `BVCTelephony` for best results
+            noise_cancellation=noise_cancellation.BVC(),
+        ),
     )
 
+    # Join the room and connect to the user
     await ctx.connect()
 
 
